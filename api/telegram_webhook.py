@@ -1,48 +1,50 @@
-# api/telegram_webhook.py - The webhook handler for Vercel
-from http.server import BaseHTTPRequestHandler
+# api/telegram_webhook.py - Updated for Flask
+from flask import Flask, request, jsonify
+import os
 import json
-import config
-from engine import process_command  # Import your logic
+import urllib.request
+from engine import process_command  # This imports your accounting logic
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # 1. Telegram sends messages here
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        update = json.loads(post_data)
-        
-        # 2. Extract chat ID and message text
-        try:
-            message = update['message']
-            chat_id = message['chat']['id']
-            text = message.get('text', '')
-        except KeyError:
-            self.send_response(400)
-            self.end_headers()
-            return
-        
-        # 3. Process the command using your engine
-        reply = process_command(text)
-        
-        # 4. Send the reply back to Telegram
-        self.send_telegram_message(chat_id, reply)
-        
-        # 5. Send success response
-        self.send_response(200)
-        self.end_headers()
-        return
+app = Flask(__name__)
+
+# Load your config (make sure your .env variables are set in Vercel)
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+
+def send_telegram_message(chat_id, text):
+    """Helper function to send replies back to Telegram."""
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
+    data = json.dumps({'chat_id': chat_id, 'text': text})
+    req = urllib.request.Request(url, data=data.encode('utf-8'),
+                               headers={'Content-Type': 'application/json'})
+    urllib.request.urlopen(req)
+
+@app.route('/api/telegram_webhook', methods=['POST'])
+def webhook():
+    """The main endpoint where Telegram sends messages."""
+    update = request.get_json()
     
-    def send_telegram_message(self, chat_id, text):
-        """Helper to send messages via Telegram API."""
-        import urllib.request
-        url = f'https://api.telegram.org/bot{config.TELEGRAM_TOKEN}/sendMessage'
-        data = json.dumps({'chat_id': chat_id, 'text': text})
-        req = urllib.request.Request(url, data=data.encode('utf-8'), 
-                                   headers={'Content-Type': 'application/json'})
-        urllib.request.urlopen(req)
+    # Extract the message and chat ID
+    try:
+        message = update['message']
+        chat_id = message['chat']['id']
+        text = message.get('text', '')
+    except KeyError:
+        return jsonify({'status': 'error', 'message': 'Invalid request'}), 400
     
-    def do_GET(self):
-        # Simple response for browser visits (optional)
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is running!")
+    # Process the command using your existing engine
+    bot_reply = process_command(text)
+    
+    # Send the reply back to the user on Telegram
+    send_telegram_message(chat_id, bot_reply)
+    
+    # Return a successful response to Telegram
+    return jsonify({'status': 'ok'})
+
+@app.route('/')
+def index():
+    """A simple test route to check if the app is running."""
+    return "🤖 Accounting Bot is running!"
+
+# This is the 'app' object Vercel looks for
+if __name__ == '__main__':
+    app.run(debug=True)
