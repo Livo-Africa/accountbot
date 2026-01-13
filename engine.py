@@ -1,73 +1,176 @@
-# engine.py - All your business logic
+# engine.py - The core logic for your Accounting Bot
+import os
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
-import config
 
-# --- Setup Google Sheets ---
+# ==================== CONFIGURATION ====================
+# Define what parts of Google Sheets we can access
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-creds = Credentials.from_service_account_file('credentials.json', scopes=SCOPES)
-client = gspread.authorize(creds)
-sheet = client.open_by_key(config.GOOGLE_SHEET_ID)
-transactions_sheet = sheet.worksheet("Transactions")
 
-def record_transaction(trans_type, amount, description="", client_name=""):
-    """Records a transaction to Google Sheets."""
+# ==================== GOOGLE SHEETS SETUP ====================
+def get_google_sheets_client():
+    """
+    Connects to Google Sheets using credentials from the Vercel environment variable.
+    This is the secure way to do it on platforms like Vercel.
+    """
+    # 1. Get the credentials JSON string from the environment variable
+    credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
+    
+    if not credentials_json:
+        # This error will appear in your Vercel logs if the variable is missing
+        raise ValueError("❌ CRITICAL ERROR: The 'GOOGLE_CREDENTIALS' environment variable is not set. Please add it in your Vercel project settings.")
+    
     try:
-        row = [
-            datetime.now().strftime('%Y-%m-%d'),
-            trans_type,
-            float(amount),
-            description,
-            client_name,
-            "user",  # You can replace with actual user ID later
-            datetime.now().isoformat()
-        ]
-        transactions_sheet.append_row(row)
-        return f"✅ Recorded {trans_type} of {amount} for {description}"
+        # 2. Convert the JSON string into a Python dictionary
+        credentials_info = json.loads(credentials_json)
+        
+        # 3. Create credentials using the dictionary (not a file)
+        creds = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
+        
+        # 4. Authorize and return the gspread client
+        client = gspread.authorize(creds)
+        return client
+    except json.JSONDecodeError:
+        raise ValueError("❌ The 'GOOGLE_CREDENTIALS' environment variable contains invalid JSON. Please check it in Vercel.")
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        raise Exception(f"❌ Failed to connect to Google Sheets: {str(e)}")
+
+# Create the client connection (this runs once when the module loads)
+try:
+    client = get_google_sheets_client()
+    # Get your Google Sheet using its ID from the environment
+    SHEET_ID = os.environ.get('GOOGLE_SHEET_ID')
+    if not SHEET_ID:
+        print("⚠️ Warning: GOOGLE_SHEET_ID environment variable is not set.")
+    
+    spreadsheet = client.open_by_key(SHEET_ID) if SHEET_ID else None
+    transactions_sheet = spreadsheet.worksheet("Transactions") if spreadsheet else None
+except Exception as e:
+    # If setup fails, the error will be logged, but we allow the app to start
+    # so you can see the error when you try to use a command.
+    print(f"⚠️ Initial Google Sheets connection failed: {e}")
+    transactions_sheet = None
+
+# ==================== CORE FUNCTIONS ====================
+def record_transaction(trans_type, amount, description="", client_name=""):
+    """
+    Records a transaction (sale, expense, income) to the Google Sheet.
+    Returns a message string for the user.
+    """
+    # Check if we have a working connection
+    if transactions_sheet is None:
+        return "❌ Bot error: Not connected to the database. Check server logs."
+    
+    try:
+        # Prepare the row of data according to YOUR sheet structure:
+        # date | type | amount | description | user | timestamp
+        row = [
+            datetime.now().strftime('%Y-%m-%d'),  # date
+            trans_type,                           # type (sale/expense/income)
+            float(amount),                        # amount
+            description,                          # description
+            "user",                               # user (placeholder for Telegram user ID)
+            datetime.now().isoformat()            # timestamp
+        ]
+        
+        # Add the row to the bottom of the sheet
+        transactions_sheet.append_row(row)
+        
+        # Success message
+        return f"✅ Recorded {trans_type} of {amount} for '{description}'"
+        
+    except Exception as e:
+        # Catch any error and return a user-friendly message
+        return f"❌ Failed to save: {str(e)}"
 
 def get_balance():
-    """Calculates the current balance from all transactions."""
+    """
+    Calculates the current balance by adding all income/sales and subtracting expenses.
+    """
+    if transactions_sheet is None:
+        return "❌ Bot error: Not connected to the database."
+    
     try:
+        # Get all records from the sheet (list of dictionaries)
         records = transactions_sheet.get_all_records()
+        
         balance = 0
         for record in records:
+            # Ensure the record has the expected keys
+            if 'type' not in record or 'amount' not in record:
+                continue
+                
             if record['type'] in ['sale', 'income']:
                 balance += record['amount']
             elif record['type'] == 'expense':
                 balance -= record['amount']
+        
         return f"💰 Current Balance: {balance}"
+        
     except Exception as e:
         return f"❌ Error calculating balance: {str(e)}"
 
-def process_command(text):
-    """The main function that processes any user command."""
-    text = text.strip().lower()
+# ==================== COMMAND PROCESSOR ====================
+def process_command(user_input):
+    """
+    The main function that processes any command from Telegram.
+    Takes the user's text, figures out what they want, and returns a reply.
+    """
+    # Convert to lowercase and remove extra spaces
+    text = user_input.strip().lower()
     
+    # ----- Record a Sale -----
     if text.startswith('+sale'):
-        # Example: "+sale 2500 Website client=Kojo"
-        parts = text[1:].split()  # Remove the '+' and split
-        if len(parts) < 2:
-            return "❌ Format: +sale [amount] [description]"
-        return record_transaction('sale', parts[1], ' '.join(parts[2:]))
+        # Example: "+sale 2500 Website Design client=Kojo"
+        parts = text.split()
+        
+        if len(parts) < 3:  # Need at least: +sale, amount, description
+            return "❌ Format: +sale [amount] [description] (e.g., +sale 1500 Website project)"
+        
+        try:
+            amount = float(parts[1])  # Second item should be the amount
+            description = ' '.join(parts[2:])  # Everything else is the description
+            return record_transaction('sale', amount, description)
+        except ValueError:
+            return "❌ Amount must be a number. Example: +sale 1500 Website project"
     
+    # ----- Record an Expense -----
     elif text.startswith('+expense'):
-        parts = text[1:].split()
-        if len(parts) < 2:
-            return "❌ Format: +expense [amount] [description]"
-        return record_transaction('expense', parts[1], ' '.join(parts[2:]))
+        parts = text.split()
+        
+        if len(parts) < 3:
+            return "❌ Format: +expense [amount] [description] (e.g., +expense 50 Office supplies)"
+        
+        try:
+            amount = float(parts[1])
+            description = ' '.join(parts[2:])
+            return record_transaction('expense', amount, description)
+        except ValueError:
+            return "❌ Amount must be a number. Example: +expense 50 Office supplies"
     
+    # ----- Check Balance -----
     elif text == 'balance':
         return get_balance()
     
-    elif text == 'help':
-        return """📖 **Available Commands:**
-+sale [amount] [description]
-+expense [amount] [description]
-balance - Check current balance
-help - Show this message"""
+    # ----- Help Command -----
+    elif text == 'help' or text == '/start':
+        return """📖 **Accounting Bot Commands:**
+        
+*Record Transactions:*
+`+sale [amount] [description]` - Record income
+`+expense [amount] [description]` - Record a cost
+
+*Get Information:*
+`balance` - Check your current balance
+`help` - Show this message
+
+*Examples:*
+`+sale 2000 Website design`
+`+expense 300 Marketing ads`
+`balance`"""
     
+    # ----- Unknown Command -----
     else:
-        return "🤔 Command not recognized. Type 'help' for options."
+        return "🤔 Command not recognized. Type `help` to see available commands."
