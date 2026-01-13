@@ -18,7 +18,7 @@ def send_telegram_message(chat_id, text):
                                headers={'Content-Type': 'application/json'})
     urllib.request.urlopen(req)
 
-@app.route('/api/telegram_webhook', methods=['POST'])
+@app.route('/', methods=['POST'])
 def webhook():
     """The main endpoint where Telegram sends messages."""
     update = request.get_json()
