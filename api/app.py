@@ -35,33 +35,43 @@ def send_telegram_message(chat_id, text):
 @app.route('/api/app', methods=['POST'])
 def webhook():
     """
-    The main endpoint where Telegram sends all messages.
-    This route MUST match the URL you set in the webhook.
+    The main endpoint where Telegram sends all updates.
+    Safely handles different update types (messages, joins, etc.).
     """
     # 1. Get the JSON data Telegram sent
     update = request.get_json()
     
-    # 2. Extract the essential parts: chat ID, message text, and user's first name
-    try:
+    # 2. Initialize variables (safer than assuming they exist)
+    chat_id = None
+    text = ""
+    user_first_name = "User"
+
+    # 3. Check if this is a MESSAGE with TEXT (the only type we process)
+    if 'message' in update and 'text' in update['message']:
         message = update['message']
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
-        # *** FIX: Get the user's actual first name ***
         user_first_name = message['from'].get('first_name', 'User')
-    except KeyError:
-        # If the request doesn't have the expected structure, ignore it
-        return jsonify({'status': 'bad request'}), 400
     
-    # 3. Process the command using your accounting engine
-    # *** FIX: Pass the user's name to the engine ***
-    bot_reply = process_command(text, user_first_name)
+    # 4. If it's a different update (user joined, left, etc.), ignore it.
+    #    Telegram expects a 200 OK response even for ignored updates.
+    elif 'my_chat_member' in update or 'chat_member' in update:
+        # These are group membership updates. Log and ignore.
+        print("ℹ️  Debug: Received a chat member update, ignoring.")
+        return jsonify({'status': 'ok'})
     
-    # 4. Send the reply back to the user on Telegram
-    send_telegram_message(chat_id, bot_reply)
-    
-    # 5. Return a success response to Telegram
-    return jsonify({'status': 'ok'})
+    else:
+        # Log other unexpected updates for debugging but ignore them
+        print(f"⚠️  Debug: Received an unhandled update type: {update.keys()}")
+        return jsonify({'status': 'ok'})
 
+    # 5. If we have a valid text command, process it
+    if chat_id is not None and text:
+        bot_reply = process_command(text, user_first_name)
+        send_telegram_message(chat_id, bot_reply)
+
+    # 6. Always return success to Telegram
+    return jsonify({'status': 'ok'})
 @app.route('/', methods=['GET'])
 def index():
     """
