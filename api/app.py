@@ -41,17 +41,20 @@ def webhook():
     # 1. Get the JSON data Telegram sent
     update = request.get_json()
     
-    # 2. Extract the essential parts: chat ID and message text
+    # 2. Extract the essential parts: chat ID, message text, and user's first name
     try:
         message = update['message']
         chat_id = message['chat']['id']
         text = message.get('text', '').strip()
+        # *** FIX: Get the user's actual first name ***
+        user_first_name = message['from'].get('first_name', 'User')
     except KeyError:
         # If the request doesn't have the expected structure, ignore it
         return jsonify({'status': 'bad request'}), 400
     
     # 3. Process the command using your accounting engine
-    bot_reply = process_command(text)
+    # *** FIX: Pass the user's name to the engine ***
+    bot_reply = process_command(text, user_first_name)
     
     # 4. Send the reply back to the user on Telegram
     send_telegram_message(chat_id, bot_reply)
@@ -65,7 +68,7 @@ def index():
     A simple test route to verify the app is running.
     Visiting your Vercel URL in a browser triggers this.
     """
-    return "🤖 Accounting Bot is running!"
+    return "🤖 Accounting Bot is running! The webhook is active at /api/app"
 
 # ==================== START APPLICATION ====================
 # This block is for running the app locally for testing.

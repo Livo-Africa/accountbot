@@ -54,9 +54,10 @@ except Exception as e:
     transactions_sheet = None
 
 # ==================== CORE FUNCTIONS ====================
-def record_transaction(trans_type, amount, description="", client_name=""):
+def record_transaction(trans_type, amount, description="", user_name="User"):
     """
     Records a transaction (sale, expense, income) to the Google Sheet.
+    *** FIX: Now accepts and uses the actual user_name. ***
     Returns a message string for the user.
     """
     # Check if we have a working connection
@@ -71,7 +72,7 @@ def record_transaction(trans_type, amount, description="", client_name=""):
             trans_type,                           # type (sale/expense/income)
             float(amount),                        # amount
             description,                          # description
-            "user",                               # user (placeholder for Telegram user ID)
+            user_name,                            # *** FIX: Now uses the real user name ***
             datetime.now().isoformat()            # timestamp
         ]
         
@@ -88,42 +89,63 @@ def record_transaction(trans_type, amount, description="", client_name=""):
 def get_balance():
     """
     Calculates the current balance by adding all income/sales and subtracting expenses.
+    *** FIX: More robust handling of data types and debug logging. ***
     """
     if transactions_sheet is None:
         return "❌ Bot error: Not connected to the database."
     
     try:
-        # Get all records from the sheet (list of dictionaries)
+        # Get all records from the sheet
         records = transactions_sheet.get_all_records()
-        
-        balance = 0
-        for record in records:
-            # Ensure the record has the expected keys
-            if 'type' not in record or 'amount' not in record:
-                continue
-                
-            if record['type'] in ['sale', 'income']:
-                balance += record['amount']
-            elif record['type'] == 'expense':
-                balance -= record['amount']
-        
-        return f"💰 Current Balance: {balance}"
-        
+        # Print to logs for debugging (check Vercel logs after this)
+        print(f"📊 Debug: Found {len(records)} records to process.")
+
+        balance = 0.0
+        for i, record in enumerate(records):
+            # 1. Convert amount to float, safely
+            try:
+                # Try to get amount, handle if it's missing or a string
+                amount_str = str(record.get('amount', 0)).replace(',', '').strip()
+                amount_val = float(amount_str) if amount_str else 0.0
+            except (ValueError, TypeError):
+                print(f"⚠️ Debug: Could not convert amount in row {i+2}: {record.get('amount')}")
+                amount_val = 0.0
+
+            # 2. Check the type (case-insensitive)
+            trans_type = str(record.get('type', '')).strip().lower()
+
+            if trans_type in ['sale', 'income']:
+                balance += amount_val
+                print(f"  + Added {amount_val} from {trans_type}")
+            elif trans_type == 'expense':
+                balance -= amount_val
+                print(f"  - Subtracted {amount_val} from {trans_type}")
+            else:
+                print(f"  ? Skipped row {i+2} with unknown type: '{trans_type}'")
+
+        print(f"📈 Debug: Final calculated balance: {balance}")
+        return f"💰 Current Balance: {balance:.2f}"
+
     except Exception as e:
-        return f"❌ Error calculating balance: {str(e)}"
+        # This error will appear in your Vercel logs
+        error_msg = f"❌ Error calculating balance: {str(e)}"
+        print(error_msg)
+        return error_msg
 
 # ==================== COMMAND PROCESSOR ====================
-def process_command(user_input):
+def process_command(user_input, user_name="User"):
     """
     The main function that processes any command from Telegram.
+    *** FIX: Now accepts the user_name parameter. ***
     Takes the user's text, figures out what they want, and returns a reply.
     """
     # Convert to lowercase and remove extra spaces
     text = user_input.strip().lower()
     
     # ----- Record a Sale -----
+    # *** FIX: Now passes user_name to record_transaction ***
     if text.startswith('+sale'):
-        # Example: "+sale 2500 Website Design client=Kojo"
+        # Example: "+sale 2500 Website Design"
         parts = text.split()
         
         if len(parts) < 3:  # Need at least: +sale, amount, description
@@ -132,11 +154,12 @@ def process_command(user_input):
         try:
             amount = float(parts[1])  # Second item should be the amount
             description = ' '.join(parts[2:])  # Everything else is the description
-            return record_transaction('sale', amount, description)
+            return record_transaction('sale', amount, description, user_name)
         except ValueError:
             return "❌ Amount must be a number. Example: +sale 1500 Website project"
     
     # ----- Record an Expense -----
+    # *** FIX: Now passes user_name to record_transaction ***
     elif text.startswith('+expense'):
         parts = text.split()
         
@@ -146,7 +169,7 @@ def process_command(user_input):
         try:
             amount = float(parts[1])
             description = ' '.join(parts[2:])
-            return record_transaction('expense', amount, description)
+            return record_transaction('expense', amount, description, user_name)
         except ValueError:
             return "❌ Amount must be a number. Example: +expense 50 Office supplies"
     
