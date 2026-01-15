@@ -1,7 +1,8 @@
-# engine.py - COMPREHENSIVE VERSION
+# engine.py - COMPREHENSIVE VERSION (All commands available everywhere)
 import os
 import json
 import gspread
+import re
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -124,7 +125,34 @@ def get_date_range(period):
         end = today
         return start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
     
+    elif period == 'yesterday':
+        yesterday = today - timedelta(days=1)
+        date_str = yesterday.strftime('%Y-%m-%d')
+        return date_str, date_str
+    
     return None, None
+
+def get_all_time_stats():
+    """Get all-time statistics."""
+    sales = get_transactions('Sales')
+    expenses = get_transactions('Expenses')
+    
+    total_sales = sum(t['amount'] for t in sales)
+    total_expenses = sum(t['amount'] for t in expenses)
+    total_profit = total_sales - total_expenses
+    
+    avg_sale = total_sales / len(sales) if sales else 0
+    avg_expense = total_expenses / len(expenses) if expenses else 0
+    
+    return {
+        'total_sales': total_sales,
+        'total_expenses': total_expenses,
+        'total_profit': total_profit,
+        'sales_count': len(sales),
+        'expenses_count': len(expenses),
+        'avg_sale': avg_sale,
+        'avg_expense': avg_expense
+    }
 
 # ==================== CORE FUNCTIONS ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
@@ -212,6 +240,7 @@ def get_today_summary():
     
     # Find top expense
     top_expense = max(expenses, key=lambda x: x['amount'], default=None)
+    top_sale = max(sales, key=lambda x: x['amount'], default=None)
     
     # Build response
     emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
@@ -221,17 +250,42 @@ def get_today_summary():
 
 💰 Sales: {format_currency(total_sales)} ({len(sales)} transaction{'s' if len(sales) != 1 else ''})"""
     
-    if sales:
-        top_sale = max(sales, key=lambda x: x['amount'])
-        message += f"\n   Top Sale: {format_currency(top_sale['amount'])} ({top_sale['description'][:30]})"
+    if top_sale:
+        message += f"\n   👑 Top Sale: {format_currency(top_sale['amount'])} by {top_sale['user']}"
+        message += f"\n      \"{top_sale['description'][:40]}{'...' if len(top_sale['description']) > 40 else ''}\""
     
     message += f"\n💸 Expenses: {format_currency(total_expenses)} ({len(expenses)} transaction{'s' if len(expenses) != 1 else ''})"
     
     if top_expense:
-        message += f"\n   Top Expense: {format_currency(top_expense['amount'])} ({top_expense['description'][:30]})"
+        message += f"\n   💸 Top Expense: {format_currency(top_expense['amount'])} by {top_expense['user']}"
+        message += f"\n      \"{top_expense['description'][:40]}{'...' if len(top_expense['description']) > 40 else ''}\""
     
     if not sales and not expenses:
         message += "\n\n📭 No transactions today yet."
+    
+    return message
+
+def get_yesterday_summary():
+    """Get yesterday's summary."""
+    yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    
+    sales = get_transactions('Sales', start_date=yesterday_str, end_date=yesterday_str)
+    expenses = get_transactions('Expenses', start_date=yesterday_str, end_date=yesterday_str)
+    
+    total_sales = sum(t['amount'] for t in sales)
+    total_expenses = sum(t['amount'] for t in expenses)
+    net = total_sales - total_expenses
+    
+    emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
+    
+    message = f"""📊 YESTERDAY'S SUMMARY ({yesterday_str})
+{emoji} Net: {format_currency(net)}
+
+💰 Sales: {format_currency(total_sales)} ({len(sales)} transactions)
+💸 Expenses: {format_currency(total_expenses)} ({len(expenses)} transactions)"""
+    
+    if not sales and not expenses:
+        message += "\n\n📭 No transactions yesterday."
     
     return message
 
@@ -260,8 +314,8 @@ def get_period_summary(period):
     worst_day = max(expenses_by_day.items(), key=lambda x: x[1], default=(None, 0))
     
     # Calculate averages
-    days_count = len(set(list(sales_by_day.keys()) + list(expenses_by_day.keys())))
-    avg_daily_profit = net / days_count if days_count > 0 else 0
+    days_count = len(set(list(sales_by_day.keys()) + list(expenses_by_day.keys()))) or 1
+    avg_daily_profit = net / days_count
     
     # Build response
     emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
@@ -271,10 +325,11 @@ def get_period_summary(period):
 {emoji} Total Profit: {format_currency(net)}
 
 💰 Total Sales: {format_currency(total_sales)} ({len(sales)} transactions)
-💸 Total Expenses: {format_currency(total_expenses)} ({len(expenses)} transactions)"""
+💸 Total Expenses: {format_currency(total_expenses)} ({len(expenses)} transactions)
+
+📆 Daily Average: {format_currency(avg_daily_profit)}"""
     
     if best_day[0]:
-        message += f"\n\n📆 Daily Average: {format_currency(avg_daily_profit)}"
         message += f"\n🏆 Best Day: {best_day[0]} ({format_currency(best_day[1])} in sales)"
     
     if worst_day[0]:
@@ -313,51 +368,81 @@ def get_top_transaction(trans_type):
 📝 {top['description']}"""
     
     # Add context if available
-    avg_amount = sum(t['amount'] for t in transactions) / len(transactions)
-    if top['amount'] > avg_amount * 2:
-        message += f"\n\n⚠️ This is {top['amount']/avg_amount:.1f}x larger than average {trans_type} ({format_currency(avg_amount)})"
+    stats = get_all_time_stats()
+    if trans_type == 'sale' and stats['sales_count'] > 0:
+        avg = stats['avg_sale']
+        message += f"\n\n📊 This is {top['amount']/avg:.1f}x larger than average sale ({format_currency(avg)})"
+    elif trans_type == 'expense' and stats['expenses_count'] > 0:
+        avg = stats['avg_expense']
+        message += f"\n\n📊 This is {top['amount']/avg:.1f}x larger than average expense ({format_currency(avg)})"
+    
+    return message
+
+def get_stats():
+    """Get comprehensive business statistics."""
+    stats = get_all_time_stats()
+    
+    message = f"""📈 BUSINESS STATISTICS (All Time)
+
+💰 Financial Overview:
+   • Total Sales: {format_currency(stats['total_sales'])}
+   • Total Expenses: {format_currency(stats['total_expenses'])}
+   • Net Profit: {format_currency(stats['total_profit'])}
+
+📊 Transaction Counts:
+   • Sales: {stats['sales_count']} transactions
+   • Expenses: {stats['expenses_count']} transactions
+   • Total: {stats['sales_count'] + stats['expenses_count']} transactions
+
+📈 Averages:
+   • Avg Sale: {format_currency(stats['avg_sale'])}
+   • Avg Expense: {format_currency(stats['avg_expense'])}
+   • Profit Margin: {(stats['total_profit'] / stats['total_sales'] * 100) if stats['total_sales'] > 0 else 0:.1f}%
+
+💡 Tips:
+   • Type 'today' for daily summary
+   • Type 'week' for weekly report
+   • Type 'top sale' or 'top expense' for records"""
     
     return message
 
 def get_help_message():
     """Returns a comprehensive help message."""
-    mention_example = f"@{BOT_USERNAME}" if BOT_USERNAME else "@YourBotUsername"
-    
-    return f"""📖 **LEDGER BOT COMMANDS**
+    return """📖 **LEDGER BOT COMMANDS**
 
 **💼 RECORD TRANSACTIONS:**
-• `+sale 500 Website design`
-• `+expense 100 Office supplies`
-• `+income 1000 Investment`
+• `+sale [amount] [description]`
+   Example: `+sale 500 Website design`
+• `+expense [amount] [description]`
+   Example: `+expense 100 Office supplies`
+• `+income [amount] [description]`
+   Example: `+income 1000 Investment`
 
 **📊 CHECK FINANCES:**
 • `balance` - Current profit/loss
 • `today` - Today's transactions
-• `week` - This week's summary
-• `month` - This month's summary
+• `yesterday` - Yesterday's summary
+• `week` - This week's report
+• `month` - This month's report
+• `stats` - All-time statistics
 • `top sale` - Largest sale ever
 • `top expense` - Largest expense ever
 
-**👥 IN GROUPS:**
-Use commands directly OR mention me:
-• `{mention_example} today`
-• `{mention_example} week`
+**🎯 QUICK TIPS:**
+• Works in both private chats and groups
+• No need to mention bot in groups
+• All commands available everywhere
+• Automatic daily summaries coming soon!
 
 **📝 EXAMPLES:**
-Private chat:
+In any chat:
+  → `+sale 1500 Project Alpha`
+  → `balance`
   → `today`
   → `week`
   → `top expense`
 
-Group chat:
-  → `{mention_example} month`
-  → `{mention_example} top sale`
-
-**🔧 OTHER COMMANDS:**
-• `help` - Show this message
-• `/start` - Welcome message
-
-Need help? Just type 'help' anytime!"""
+Need help? Just type `help` anytime!"""
 
 # ==================== COMMAND PROCESSOR ====================
 def process_command(user_input, user_name="User"):
@@ -371,6 +456,9 @@ def process_command(user_input, user_name="User"):
         if text_lower.startswith(mention_prefix.lower()):
             text = text[len(mention_prefix):].strip()
             text_lower = text.lower()
+
+    # Remove any leading/trailing punctuation from common phrases
+    text_lower = re.sub(r'^[:\s]+|[:\s]+$', '', text_lower)
 
     # Record Sale
     if text_lower.startswith('+sale'):
@@ -409,33 +497,51 @@ def process_command(user_input, user_name="User"):
             return "❌ Amount must be a number.\nExample: +income 1000 Investment"
 
     # Check Balance
-    elif text_lower == 'balance':
+    elif text_lower in ['balance', 'profit', 'net']:
         return get_balance()
 
     # Today's Summary
-    elif text_lower == 'today':
+    elif text_lower in ['today', 'today?', 'today.']:
         return get_today_summary()
 
+    # Yesterday's Summary
+    elif text_lower in ['yesterday', 'yesterday?']:
+        return get_yesterday_summary()
+
     # Week Summary
-    elif text_lower == 'week':
+    elif text_lower in ['week', 'weekly', 'this week']:
         return get_period_summary('week')
 
     # Month Summary
-    elif text_lower == 'month':
+    elif text_lower in ['month', 'monthly', 'this month']:
         return get_period_summary('month')
 
+    # Stats
+    elif text_lower in ['stats', 'statistics', 'overview']:
+        return get_stats()
+
     # Top Sale
-    elif text_lower == 'top sale':
+    elif text_lower in ['top sale', 'biggest sale', 'largest sale']:
         return get_top_transaction('sale')
 
     # Top Expense
-    elif text_lower == 'top expense':
+    elif text_lower in ['top expense', 'biggest expense', 'largest expense']:
         return get_top_transaction('expense')
 
     # Help
-    elif text_lower in ['help', '/start', '/help']:
+    elif text_lower in ['help', '/start', '/help', 'commands', 'menu']:
         return get_help_message()
 
-    # Unknown
+    # Unknown - but be helpful
     else:
-        return f"🤔 Command not recognized.\nType 'help' for available commands.\n\nTry: today, week, month, top sale, top expense"
+        return f"""🤔 Command not recognized.
+
+Try one of these:
+• `+sale 500 [description]` - Record income
+• `+expense 100 [description]` - Record cost
+• `balance` - Check current balance
+• `today` - Today's summary
+• `week` - Weekly report
+• `help` - Show all commands
+
+Type `help` for complete list!"""
