@@ -225,7 +225,7 @@ def get_balance():
         except Exception as e:
             print(f"⚠️ {sheet_name}: Error reading - {str(e)}")
 
-    return f"💰 Current Balance: {format_currency(balance)}"
+    return f" Current Balance: {format_currency(balance)}"
 
 def get_today_summary():
     """Get today's sales and expenses summary."""
@@ -245,23 +245,23 @@ def get_today_summary():
     # Build response
     emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
     
-    message = f"""📊 TODAY'S SUMMARY ({today_str})
+    message = f""" TODAY'S SUMMARY ({today_str})
 {emoji} Net: {format_currency(net)}
 
 💰 Sales: {format_currency(total_sales)} ({len(sales)} transaction{'s' if len(sales) != 1 else ''})"""
     
     if top_sale:
-        message += f"\n   👑 Top Sale: {format_currency(top_sale['amount'])} by {top_sale['user']}"
+        message += f"\n    Top Sale: {format_currency(top_sale['amount'])} by {top_sale['user']}"
         message += f"\n      \"{top_sale['description'][:40]}{'...' if len(top_sale['description']) > 40 else ''}\""
     
-    message += f"\n💸 Expenses: {format_currency(total_expenses)} ({len(expenses)} transaction{'s' if len(expenses) != 1 else ''})"
+    message += f"\n Expenses: {format_currency(total_expenses)} ({len(expenses)} transaction{'s' if len(expenses) != 1 else ''})"
     
     if top_expense:
-        message += f"\n   💸 Top Expense: {format_currency(top_expense['amount'])} by {top_expense['user']}"
+        message += f"\n    Top Expense: {format_currency(top_expense['amount'])} by {top_expense['user']}"
         message += f"\n      \"{top_expense['description'][:40]}{'...' if len(top_expense['description']) > 40 else ''}\""
     
     if not sales and not expenses:
-        message += "\n\n📭 No transactions today yet."
+        message += "\n\n No transactions today yet."
     
     return message
 
@@ -278,7 +278,7 @@ def get_yesterday_summary():
     
     emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
     
-    message = f"""📊 YESTERDAY'S SUMMARY ({yesterday_str})
+    message = f""" YESTERDAY'S SUMMARY ({yesterday_str})
 {emoji} Net: {format_currency(net)}
 
 💰 Sales: {format_currency(total_sales)} ({len(sales)} transactions)
@@ -321,7 +321,7 @@ def get_period_summary(period):
     emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
     period_display = f"{period_name}LY ({start_date} to {end_date})"
     
-    message = f"""📅 {period_display} REPORT
+    message = f""" {period_display} REPORT
 {emoji} Total Profit: {format_currency(net)}
 
 💰 Total Sales: {format_currency(total_sales)} ({len(sales)} transactions)
@@ -330,20 +330,20 @@ def get_period_summary(period):
 📆 Daily Average: {format_currency(avg_daily_profit)}"""
     
     if best_day[0]:
-        message += f"\n🏆 Best Day: {best_day[0]} ({format_currency(best_day[1])} in sales)"
+        message += f"\n Best Day: {best_day[0]} ({format_currency(best_day[1])} in sales)"
     
     if worst_day[0]:
-        message += f"\n💸 Heaviest Spending Day: {worst_day[0]} ({format_currency(worst_day[1])} in expenses)"
+        message += f"\n Heaviest Spending Day: {worst_day[0]} ({format_currency(worst_day[1])} in expenses)"
     
     # Add top transactions
     if sales:
         top_sale = max(sales, key=lambda x: x['amount'])
-        message += f"\n\n👑 Top Sale: {format_currency(top_sale['amount'])}"
+        message += f"\n\n Top Sale: {format_currency(top_sale['amount'])}"
         message += f"\n   By: {top_sale['user']} | {top_sale['description'][:40]}"
     
     if expenses:
         top_expense = max(expenses, key=lambda x: x['amount'])
-        message += f"\n💸 Top Expense: {format_currency(top_expense['amount'])}"
+        message += f"\n Top Expense: {format_currency(top_expense['amount'])}"
         message += f"\n   By: {top_expense['user']} | {top_expense['description'][:40]}"
     
     return message
@@ -408,9 +408,9 @@ def get_stats():
 
 def get_help_message():
     """Returns a comprehensive help message."""
-    return """📖 **LEDGER BOT COMMANDS**
+    return """ **ACCOUNTANT BOT COMMANDS**
 
-**💼 RECORD TRANSACTIONS:**
+**TO RECORD TRANSACTIONS:**
 • `+sale [amount] [description]`
    Example: `+sale 500 Website design`
 • `+expense [amount] [description]`
@@ -418,7 +418,7 @@ def get_help_message():
 • `+income [amount] [description]`
    Example: `+income 1000 Investment`
 
-**📊 CHECK FINANCES:**
+**TO CHECK FINANCES:**
 • `balance` - Current profit/loss
 • `today` - Today's transactions
 • `yesterday` - Yesterday's summary
@@ -428,13 +428,12 @@ def get_help_message():
 • `top sale` - Largest sale ever
 • `top expense` - Largest expense ever
 
-**🎯 QUICK TIPS:**
+** QUICK TIPS:**
 • Works in both private chats and groups
-• No need to mention bot in groups
+• You can mention bot name in group chat
 • All commands available everywhere
-• Automatic daily summaries coming soon!
 
-**📝 EXAMPLES:**
+** EXAMPLES:**
 In any chat:
   → `+sale 1500 Project Alpha`
   → `balance`
