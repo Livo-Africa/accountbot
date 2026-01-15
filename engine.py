@@ -105,7 +105,7 @@ def get_transactions(sheet_name, start_date=None, end_date=None):
 
 def format_currency(amount):
     """Format amount as currency."""
-    return f"${abs(amount):,.2f}"
+    return f"₵{abs(amount):,.2f}"
 
 def get_date_range(period):
     """Get start and end dates for period."""
@@ -365,7 +365,7 @@ def get_top_transaction(trans_type):
 💰 Amount: {format_currency(top['amount'])}
 📅 Date: {top['date']}
 👤 By: {top['user']}
-📝 {top['description']}"""
+📝product: {top['description']}"""
     
     # Add context if available
     stats = get_all_time_stats()
