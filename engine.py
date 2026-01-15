@@ -1,4 +1,4 @@
-# engine.py - MULTI-TAB VERSION
+# engine.py - ENHANCED VERSION WITH HYBRID MODE SUPPORT
 import os
 import json
 import gspread
@@ -9,14 +9,17 @@ from datetime import datetime
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # Define which transaction type goes to which sheet
-# This is the KEY CONFIGURATION for your new tabs
 TYPE_TO_SHEET = {
     'sale': 'Sales',
     'expense': 'Expenses',
-    'income': 'Income'  # For future use
+    'income': 'Income'
 }
+
 # List all sheets that should be included in balance calculation
-SHEETS_FOR_BALANCE = ['Sales', 'Income', 'Expenses']  # Expenses will be subtracted
+SHEETS_FOR_BALANCE = ['Sales', 'Income', 'Expenses']
+
+# Get bot username from environment (for help messages)
+BOT_USERNAME = os.environ.get('BOT_USERNAME', '').lstrip('@')
 
 def get_google_sheets_client():
     """Connects to Google Sheets using the Vercel environment variable."""
@@ -51,19 +54,16 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
     if spreadsheet is None:
         return "❌ Bot error: Not connected to the database."
 
-    # Determine which sheet to use based on transaction type
     sheet_name = TYPE_TO_SHEET.get(trans_type)
     if not sheet_name:
         return f"❌ Unknown transaction type: '{trans_type}'. Can't save."
 
     try:
-        # Open the specific worksheet (e.g., "Sales", "Expenses")
         target_sheet = spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
         return f"❌ Error: The '{sheet_name}' tab was not found in the Google Sheet. Please create it."
 
     try:
-        # Prepare the row data (same structure as before)
         row = [
             datetime.now().strftime('%Y-%m-%d'),
             trans_type,
@@ -72,10 +72,8 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             user_name,
             datetime.now().isoformat()
         ]
-        # Append to the CORRECT sheet
         target_sheet.append_row(row)
         return f"✅ Recorded {trans_type} of {amount} in '{sheet_name}' tab."
-
     except Exception as e:
         return f"❌ Failed to save to {sheet_name}: {str(e)}"
 
@@ -95,11 +93,10 @@ def get_balance():
             worksheet = spreadsheet.worksheet(sheet_name)
             all_rows = worksheet.get_all_values()
             
-            if len(all_rows) <= 1:  # Only headers or empty
+            if len(all_rows) <= 1:
                 print(f"  📭 {sheet_name}: No data (only headers)")
                 continue
 
-            # Find column indices
             headers = all_rows[0]
             header_lower = [h.strip().lower() for h in headers]
             try:
@@ -108,18 +105,16 @@ def get_balance():
                 print(f"  ⚠️  {sheet_name}: No 'amount' column. Skipping.")
                 continue
 
-            # Sum the 'amount' column, skipping header row
             sheet_total = 0.0
-            for row in all_rows[1:]:  # Skip header row
+            for row in all_rows[1:]:
                 if len(row) > amount_col_index:
                     amount_str = row[amount_col_index].strip()
                     try:
                         amount_val = float(amount_str) if amount_str else 0.0
                         sheet_total += amount_val
                     except ValueError:
-                        pass  # Skip non-numeric values
+                        pass
 
-            # Add or subtract based on sheet type
             if sheet_name in ['Sales', 'Income']:
                 balance += sheet_total
                 print(f"  ➕ {sheet_name}: +{sheet_total:.2f}")
@@ -133,49 +128,91 @@ def get_balance():
             print(f"  ⚠️  {sheet_name}: Error reading - {str(e)}")
 
     print(f"📈 Final calculated balance: {balance:.2f}")
-    return f"💰 Current Balance: {balance:.2f}"
+    return f"💰 Current Balance: ${balance:.2f}"
+
+def get_help_message():
+    """Returns a comprehensive help message with examples."""
+    mention_example = f"@{BOT_USERNAME}" if BOT_USERNAME else "@YourBotUsername"
+    
+    return f"""📖 **LEDGER BOT COMMANDS**
+
+**💼 RECORD TRANSACTIONS:**
+• `+sale 500 Website design`
+• `+expense 100 Office supplies`
+• `+income 1000 Investment`
+
+**📊 CHECK FINANCES:**
+• `balance` - Current profit/loss
+• `today` - Today's transactions (coming soon)
+• `report week` - Weekly summary (coming soon)
+• `report month` - Monthly summary (coming soon)
+
+**👥 IN GROUPS:**
+Use commands directly OR mention me:
+• `{mention_example} balance`
+• `{mention_example} +sale 300 Client payment`
+
+**🔧 OTHER COMMANDS:**
+• `help` - Show this message
+• `/start` - Welcome message
+
+**📝 EXAMPLES:**
+Private chat:
+  → `+sale 1500 Project Alpha`
+  → `balance`
+
+Group chat:
+  → `{mention_example} +expense 75 Lunch meeting`
+  → `{mention_example} balance`
+
+Need help? Just type 'help' anytime!"""
 
 # ==================== COMMAND PROCESSOR ====================
 def process_command(user_input, user_name="User"):
     """The main function that processes any command from Telegram."""
-    text = user_input.strip().lower()
+    text = user_input.strip()
+    text_lower = text.lower()
+
+    # Clean the input if it contains bot mention
+    if BOT_USERNAME:
+        # Remove @bot_username from the beginning of the text
+        mention_prefix = f"@{BOT_USERNAME}"
+        if text_lower.startswith(mention_prefix.lower()):
+            text = text[len(mention_prefix):].strip()
+            text_lower = text.lower()
 
     # Record Sale
-    if text.startswith('+sale'):
+    if text_lower.startswith('+sale'):
         parts = text.split()
         if len(parts) < 3:
-            return "❌ Format: +sale [amount] [description]"
+            return "❌ Format: +sale [amount] [description]\nExample: +sale 500 Website design"
         try:
             amount = float(parts[1])
             description = ' '.join(parts[2:])
             return record_transaction('sale', amount, description, user_name)
         except ValueError:
-            return "❌ Amount must be a number."
+            return "❌ Amount must be a number.\nExample: +sale 500 Website design"
 
     # Record Expense
-    elif text.startswith('+expense'):
+    elif text_lower.startswith('+expense'):
         parts = text.split()
         if len(parts) < 3:
-            return "❌ Format: +expense [amount] [description]"
+            return "❌ Format: +expense [amount] [description]\nExample: +expense 100 Coffee supplies"
         try:
             amount = float(parts[1])
             description = ' '.join(parts[2:])
             return record_transaction('expense', amount, description, user_name)
         except ValueError:
-            return "❌ Amount must be a number."
+            return "❌ Amount must be a number.\nExample: +expense 100 Coffee supplies"
 
     # Check Balance
-    elif text == 'balance':
+    elif text_lower == 'balance':
         return get_balance()
 
     # Help
-    elif text in ['help', '/start', '/help']:
-        return """📖 **Accounting Bot Commands:**
-+sale [amount] [description]
-+expense [amount] [description]
-balance
-help"""
+    elif text_lower in ['help', '/start', '/help']:
+        return get_help_message()
 
     # Unknown
     else:
-        return "🤔 Command not recognized. Type 'help'."
+        return "🤔 Command not recognized.\nType 'help' for available commands and examples."
