@@ -1,9 +1,10 @@
-# engine.py - ENHANCED VERSION WITH HYBRID MODE SUPPORT
+# engine.py - COMPREHENSIVE VERSION
 import os
 import json
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import defaultdict
 
 # ==================== CONFIGURATION ====================
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -14,9 +15,6 @@ TYPE_TO_SHEET = {
     'expense': 'Expenses',
     'income': 'Income'
 }
-
-# List all sheets that should be included in balance calculation
-SHEETS_FOR_BALANCE = ['Sales', 'Income', 'Expenses']
 
 # Get bot username from environment (for help messages)
 BOT_USERNAME = os.environ.get('BOT_USERNAME', '').lstrip('@')
@@ -48,6 +46,86 @@ except Exception as e:
     print(f"⚠️ Initial connection failed: {e}")
     spreadsheet = None
 
+# ==================== HELPER FUNCTIONS ====================
+def get_transactions(sheet_name, start_date=None, end_date=None):
+    """Get transactions from a specific sheet within a date range."""
+    if spreadsheet is None:
+        return []
+    
+    try:
+        worksheet = spreadsheet.worksheet(sheet_name)
+        all_rows = worksheet.get_all_values()
+        
+        if len(all_rows) <= 1:  # Only headers
+            return []
+        
+        # Parse headers
+        headers = [h.strip().lower() for h in all_rows[0]]
+        try:
+            date_idx = headers.index('date')
+            amount_idx = headers.index('amount')
+            desc_idx = headers.index('description')
+            user_idx = headers.index('user')
+        except ValueError:
+            return []
+        
+        transactions = []
+        for row in all_rows[1:]:
+            if len(row) <= max(date_idx, amount_idx, desc_idx, user_idx):
+                continue
+            
+            date_str = row[date_idx].strip()
+            amount_str = row[amount_idx].strip()
+            description = row[desc_idx] if desc_idx < len(row) else ''
+            user = row[user_idx] if user_idx < len(row) else ''
+            
+            # Filter by date if specified
+            if start_date and date_str < start_date:
+                continue
+            if end_date and date_str > end_date:
+                continue
+            
+            try:
+                amount = float(amount_str) if amount_str else 0.0
+                transactions.append({
+                    'date': date_str,
+                    'amount': amount,
+                    'description': description,
+                    'user': user,
+                    'type': 'sale' if sheet_name == 'Sales' else 'expense'
+                })
+            except ValueError:
+                continue
+        
+        return transactions
+    except Exception as e:
+        print(f"⚠️ Error reading {sheet_name}: {e}")
+        return []
+
+def format_currency(amount):
+    """Format amount as currency."""
+    return f"${abs(amount):,.2f}"
+
+def get_date_range(period):
+    """Get start and end dates for period."""
+    today = datetime.now().date()
+    
+    if period == 'today':
+        date_str = today.strftime('%Y-%m-%d')
+        return date_str, date_str
+    
+    elif period == 'week':
+        start = today - timedelta(days=today.weekday())  # Monday
+        end = today
+        return start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    
+    elif period == 'month':
+        start = today.replace(day=1)
+        end = today
+        return start.strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d')
+    
+    return None, None
+
 # ==================== CORE FUNCTIONS ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
     """Records a transaction to the SPECIFIC Google Sheet tab based on type."""
@@ -61,7 +139,7 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
     try:
         target_sheet = spreadsheet.worksheet(sheet_name)
     except gspread.exceptions.WorksheetNotFound:
-        return f"❌ Error: The '{sheet_name}' tab was not found in the Google Sheet. Please create it."
+        return f"❌ Error: The '{sheet_name}' tab was not found in the Google Sheet."
 
     try:
         row = [
@@ -73,42 +151,36 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             datetime.now().isoformat()
         ]
         target_sheet.append_row(row)
-        return f"✅ Recorded {trans_type} of {amount} in '{sheet_name}' tab."
+        return f"✅ Recorded {trans_type} of {format_currency(amount)} in '{sheet_name}' tab."
     except Exception as e:
         return f"❌ Failed to save to {sheet_name}: {str(e)}"
 
 def get_balance():
-    """
-    Calculates the current balance by reading from MULTIPLE sheets.
-    Reads all 'Sales' and 'Income', subtracts all 'Expenses'.
-    """
+    """Calculates the current balance."""
     if spreadsheet is None:
         return "❌ Bot error: Not connected to the database."
 
     balance = 0.0
     print("📊 Starting balance calculation from multiple tabs...")
 
-    for sheet_name in SHEETS_FOR_BALANCE:
+    for sheet_name in ['Sales', 'Income', 'Expenses']:
         try:
             worksheet = spreadsheet.worksheet(sheet_name)
             all_rows = worksheet.get_all_values()
             
             if len(all_rows) <= 1:
-                print(f"  📭 {sheet_name}: No data (only headers)")
                 continue
 
-            headers = all_rows[0]
-            header_lower = [h.strip().lower() for h in headers]
+            headers = [h.strip().lower() for h in all_rows[0]]
             try:
-                amount_col_index = header_lower.index('amount')
+                amount_idx = headers.index('amount')
             except ValueError:
-                print(f"  ⚠️  {sheet_name}: No 'amount' column. Skipping.")
                 continue
 
             sheet_total = 0.0
             for row in all_rows[1:]:
-                if len(row) > amount_col_index:
-                    amount_str = row[amount_col_index].strip()
+                if len(row) > amount_idx:
+                    amount_str = row[amount_idx].strip()
                     try:
                         amount_val = float(amount_str) if amount_str else 0.0
                         sheet_total += amount_val
@@ -117,21 +189,138 @@ def get_balance():
 
             if sheet_name in ['Sales', 'Income']:
                 balance += sheet_total
-                print(f"  ➕ {sheet_name}: +{sheet_total:.2f}")
             elif sheet_name == 'Expenses':
                 balance -= sheet_total
-                print(f"  ➖ {sheet_name}: -{sheet_total:.2f}")
 
         except gspread.exceptions.WorksheetNotFound:
-            print(f"  ❌ {sheet_name}: Tab not found (ignoring)")
+            pass
         except Exception as e:
-            print(f"  ⚠️  {sheet_name}: Error reading - {str(e)}")
+            print(f"⚠️ {sheet_name}: Error reading - {str(e)}")
 
-    print(f"📈 Final calculated balance: {balance:.2f}")
-    return f"💰 Current Balance: ₵{balance:.2f}"
+    return f"💰 Current Balance: {format_currency(balance)}"
+
+def get_today_summary():
+    """Get today's sales and expenses summary."""
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    
+    sales = get_transactions('Sales', start_date=today_str, end_date=today_str)
+    expenses = get_transactions('Expenses', start_date=today_str, end_date=today_str)
+    
+    total_sales = sum(t['amount'] for t in sales)
+    total_expenses = sum(t['amount'] for t in expenses)
+    net = total_sales - total_expenses
+    
+    # Find top expense
+    top_expense = max(expenses, key=lambda x: x['amount'], default=None)
+    
+    # Build response
+    emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
+    
+    message = f"""📊 TODAY'S SUMMARY ({today_str})
+{emoji} Net: {format_currency(net)}
+
+💰 Sales: {format_currency(total_sales)} ({len(sales)} transaction{'s' if len(sales) != 1 else ''})"""
+    
+    if sales:
+        top_sale = max(sales, key=lambda x: x['amount'])
+        message += f"\n   Top Sale: {format_currency(top_sale['amount'])} ({top_sale['description'][:30]})"
+    
+    message += f"\n💸 Expenses: {format_currency(total_expenses)} ({len(expenses)} transaction{'s' if len(expenses) != 1 else ''})"
+    
+    if top_expense:
+        message += f"\n   Top Expense: {format_currency(top_expense['amount'])} ({top_expense['description'][:30]})"
+    
+    if not sales and not expenses:
+        message += "\n\n📭 No transactions today yet."
+    
+    return message
+
+def get_period_summary(period):
+    """Get summary for week or month."""
+    start_date, end_date = get_date_range(period)
+    period_name = period.upper()
+    
+    sales = get_transactions('Sales', start_date=start_date, end_date=end_date)
+    expenses = get_transactions('Expenses', start_date=start_date, end_date=end_date)
+    
+    total_sales = sum(t['amount'] for t in sales)
+    total_expenses = sum(t['amount'] for t in expenses)
+    net = total_sales - total_expenses
+    
+    # Group by day for insights
+    sales_by_day = defaultdict(float)
+    expenses_by_day = defaultdict(float)
+    
+    for s in sales:
+        sales_by_day[s['date']] += s['amount']
+    for e in expenses:
+        expenses_by_day[e['date']] += e['amount']
+    
+    best_day = max(sales_by_day.items(), key=lambda x: x[1], default=(None, 0))
+    worst_day = max(expenses_by_day.items(), key=lambda x: x[1], default=(None, 0))
+    
+    # Calculate averages
+    days_count = len(set(list(sales_by_day.keys()) + list(expenses_by_day.keys())))
+    avg_daily_profit = net / days_count if days_count > 0 else 0
+    
+    # Build response
+    emoji = "📈" if net > 0 else "📉" if net < 0 else "➖"
+    period_display = f"{period_name}LY ({start_date} to {end_date})"
+    
+    message = f"""📅 {period_display} REPORT
+{emoji} Total Profit: {format_currency(net)}
+
+💰 Total Sales: {format_currency(total_sales)} ({len(sales)} transactions)
+💸 Total Expenses: {format_currency(total_expenses)} ({len(expenses)} transactions)"""
+    
+    if best_day[0]:
+        message += f"\n\n📆 Daily Average: {format_currency(avg_daily_profit)}"
+        message += f"\n🏆 Best Day: {best_day[0]} ({format_currency(best_day[1])} in sales)"
+    
+    if worst_day[0]:
+        message += f"\n💸 Heaviest Spending Day: {worst_day[0]} ({format_currency(worst_day[1])} in expenses)"
+    
+    # Add top transactions
+    if sales:
+        top_sale = max(sales, key=lambda x: x['amount'])
+        message += f"\n\n👑 Top Sale: {format_currency(top_sale['amount'])}"
+        message += f"\n   By: {top_sale['user']} | {top_sale['description'][:40]}"
+    
+    if expenses:
+        top_expense = max(expenses, key=lambda x: x['amount'])
+        message += f"\n💸 Top Expense: {format_currency(top_expense['amount'])}"
+        message += f"\n   By: {top_expense['user']} | {top_expense['description'][:40]}"
+    
+    return message
+
+def get_top_transaction(trans_type):
+    """Get the largest transaction of a specific type."""
+    sheet_name = 'Sales' if trans_type == 'sale' else 'Expenses'
+    transactions = get_transactions(sheet_name)
+    
+    if not transactions:
+        return f"❌ No {trans_type}s found."
+    
+    top = max(transactions, key=lambda x: x['amount'])
+    
+    emoji = "👑" if trans_type == 'sale' else "💸"
+    title = "TOP SALE" if trans_type == 'sale' else "TOP EXPENSE"
+    
+    message = f"""{emoji} {title} (All Time)
+💰 Amount: {format_currency(top['amount'])}
+📅 Date: {top['date']}
+👤 By: {top['user']}
+📝 {top['description']}"""
+    
+    # Add context if available
+    avg_amount = sum(t['amount'] for t in transactions) / len(transactions)
+    if top['amount'] > avg_amount * 2:
+        message += f"\n\n⚠️ This is {top['amount']/avg_amount:.1f}x larger than average {trans_type} ({format_currency(avg_amount)})"
+    
+    return message
 
 def get_help_message():
-    """Returns a comprehensive help message with examples."""
+    """Returns a comprehensive help message."""
     mention_example = f"@{BOT_USERNAME}" if BOT_USERNAME else "@YourBotUsername"
     
     return f"""📖 **LEDGER BOT COMMANDS**
@@ -143,27 +332,30 @@ def get_help_message():
 
 **📊 CHECK FINANCES:**
 • `balance` - Current profit/loss
-• `today` - Today's transactions (coming soon)
-• `report week` - Weekly summary (coming soon)
-• `report month` - Monthly summary (coming soon)
+• `today` - Today's transactions
+• `week` - This week's summary
+• `month` - This month's summary
+• `top sale` - Largest sale ever
+• `top expense` - Largest expense ever
 
 **👥 IN GROUPS:**
 Use commands directly OR mention me:
-• `{mention_example} balance`
-• `{mention_example} +sale 300 Client payment`
+• `{mention_example} today`
+• `{mention_example} week`
+
+**📝 EXAMPLES:**
+Private chat:
+  → `today`
+  → `week`
+  → `top expense`
+
+Group chat:
+  → `{mention_example} month`
+  → `{mention_example} top sale`
 
 **🔧 OTHER COMMANDS:**
 • `help` - Show this message
 • `/start` - Welcome message
-
-**📝 EXAMPLES:**
-Private chat:
-  → `+sale 1500 Project Alpha`
-  → `balance`
-
-Group chat:
-  → `{mention_example} +expense 75 Lunch meeting`
-  → `{mention_example} balance`
 
 Need help? Just type 'help' anytime!"""
 
@@ -175,7 +367,6 @@ def process_command(user_input, user_name="User"):
 
     # Clean the input if it contains bot mention
     if BOT_USERNAME:
-        # Remove @bot_username from the beginning of the text
         mention_prefix = f"@{BOT_USERNAME}"
         if text_lower.startswith(mention_prefix.lower()):
             text = text[len(mention_prefix):].strip()
@@ -205,9 +396,41 @@ def process_command(user_input, user_name="User"):
         except ValueError:
             return "❌ Amount must be a number.\nExample: +expense 100 Coffee supplies"
 
+    # Record Income
+    elif text_lower.startswith('+income'):
+        parts = text.split()
+        if len(parts) < 3:
+            return "❌ Format: +income [amount] [description]\nExample: +income 1000 Investment"
+        try:
+            amount = float(parts[1])
+            description = ' '.join(parts[2:])
+            return record_transaction('income', amount, description, user_name)
+        except ValueError:
+            return "❌ Amount must be a number.\nExample: +income 1000 Investment"
+
     # Check Balance
     elif text_lower == 'balance':
         return get_balance()
+
+    # Today's Summary
+    elif text_lower == 'today':
+        return get_today_summary()
+
+    # Week Summary
+    elif text_lower == 'week':
+        return get_period_summary('week')
+
+    # Month Summary
+    elif text_lower == 'month':
+        return get_period_summary('month')
+
+    # Top Sale
+    elif text_lower == 'top sale':
+        return get_top_transaction('sale')
+
+    # Top Expense
+    elif text_lower == 'top expense':
+        return get_top_transaction('expense')
 
     # Help
     elif text_lower in ['help', '/start', '/help']:
@@ -215,4 +438,4 @@ def process_command(user_input, user_name="User"):
 
     # Unknown
     else:
-        return "🤔 Command not recognized.\nType 'help' for available commands and examples."
+        return f"🤔 Command not recognized.\nType 'help' for available commands.\n\nTry: today, week, month, top sale, top expense"
