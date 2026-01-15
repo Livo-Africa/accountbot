@@ -1,9 +1,10 @@
-# api/app.py - HYBRID MODE VERSION
+# api/app.py - SIMPLE HYBRID MODE
 from flask import Flask, request, jsonify
 import os
 import json
 import urllib.request
-from engine import process_command, BOT_USERNAME
+import re
+from engine import process_command
 
 app = Flask(__name__)
 
@@ -11,15 +12,13 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 if not TELEGRAM_TOKEN:
     raise RuntimeError("❌ TELEGRAM_TOKEN is not set.")
 
-# Get bot username (without @)
-TELEGRAM_BOT_USERNAME = os.environ.get('BOT_USERNAME', '').lstrip('@')
-if not TELEGRAM_BOT_USERNAME:
-    print("⚠️ Warning: BOT_USERNAME not set. Mention mode won't work in groups.")
+# Get bot username from environment (without @)
+BOT_USERNAME = os.environ.get('BOT_USERNAME', '').lstrip('@')
 
 def send_telegram_message(chat_id, text):
     """Sends a message back to Telegram."""
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-    data = json.dumps({'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'})
+    data = json.dumps({'chat_id': chat_id, 'text': text})
     req = urllib.request.Request(url, data=data.encode('utf-8'),
                                headers={'Content-Type': 'application/json'})
     try:
@@ -27,54 +26,75 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"⚠️ Failed to send message: {e}")
 
-def is_command_for_bot(text, chat_type):
+def should_process_message(text, chat_type):
     """
-    Hybrid Mode: Determines if the bot should respond.
+    SIMPLE HYBRID MODE:
     
-    In PRIVATE chats: Respond to ALL commands (+, balance, help, /)
-    In GROUPS: Respond ONLY to:
-      1. Direct commands (starts with +, balance, help, /)
-      2. Messages that mention the bot (@bot_username command)
+    In PRIVATE CHATS (1-on-1):
+    - Respond to ALL messages (current behavior)
+    
+    In GROUPS:
+    - Respond ONLY to:
+      1. Messages starting with '/' (commands)
+      2. Messages containing @bot_username anywhere
+      3. Current +commands, balance, help
     """
-    if not text or not text.strip():
+    if not text:
         return False
     
     text_lower = text.lower().strip()
     
-    # In PRIVATE chats: respond to all command patterns
+    # In PRIVATE chats: Keep current behavior (respond to everything)
     if chat_type == 'private':
-        return (text_lower.startswith('+') or 
-                text_lower in ['balance', 'help'] or
-                text_lower.startswith('/'))
+        return True
     
-    # In GROUPS (or supergroups): stricter filtering
+    # In GROUPS: Only respond to specific triggers
     elif chat_type in ['group', 'supergroup']:
-        # Check for direct commands (must be at start of message)
-        if (text_lower.startswith('+') or 
-            text_lower in ['balance', 'help'] or
-            text_lower.startswith('/')):
+        # 1. Messages starting with command prefixes
+        if text_lower.startswith(('+', '/')):  # +sale, +expense, /start, etc.
             return True
         
-        # Check if bot is mentioned (anywhere in message)
-        if TELEGRAM_BOT_USERNAME:
-            # Check for @bot_username in the message
-            mention = f"@{TELEGRAM_BOT_USERNAME}".lower()
-            if mention in text_lower:
-                # Check if there's a command after/before mention
-                # Accept any message with bot mention + command
-                return True
+        # 2. Exact command words
+        if text_lower in ['balance', 'help']:
+            return True
         
-        # Not a command and bot not mentioned
+        # 3. Messages mentioning the bot
+        if BOT_USERNAME and f"@{BOT_USERNAME}".lower() in text_lower:
+            return True
+        
+        # 4. Ignore everything else
         return False
     
-    # For other chat types (channels), don't respond
-    else:
-        return False
+    # For other chat types
+    return False
+
+def clean_message_text(text, chat_type):
+    """
+    If in group and message contains @bot, remove the mention
+    to process the command cleanly.
+    """
+    if not BOT_USERNAME or chat_type == 'private':
+        return text.strip()
+    
+    # Remove @bot_username from message in groups
+    mention = f"@{BOT_USERNAME}"
+    text_lower = text.lower()
+    mention_lower = mention.lower()
+    
+    if mention_lower in text_lower:
+        # Remove the mention (case insensitive)
+        cleaned = re.sub(re.escape(mention), '', text, flags=re.IGNORECASE)
+        # Clean up extra spaces or punctuation
+        cleaned = re.sub(r'^\s*[,:\s]+', '', cleaned)  # Remove leading punctuation
+        cleaned = cleaned.strip()
+        return cleaned if cleaned else text.strip()
+    
+    return text.strip()
 
 @app.route('/api/app', methods=['POST'])
 def webhook():
     """
-    Main webhook with Hybrid Mode filtering.
+    Main webhook with simple hybrid mode.
     """
     update = request.get_json()
     
@@ -93,9 +113,9 @@ def webhook():
         
         print(f"📨 Received ({chat_type}): '{text}' from {user_name}")
         
-        # HYBRID MODE: Check if this message is for the bot
-        if not is_command_for_bot(text, chat_type):
-            print(f"⏭️  Ignoring (not a bot command)")
+        # Check if we should process this message
+        if not should_process_message(text, chat_type):
+            print(f"⏭️  Ignoring non-command message in {chat_type}")
             return jsonify({'status': 'ok'})
 
     # 2. IGNORE OTHER UPDATES (Group joins, leaves, etc.)
@@ -106,10 +126,13 @@ def webhook():
         print(f"⚠️  Ignoring unhandled update type.")
         return jsonify({'status': 'ok'})
 
-    # 3. PROCESS THE COMMAND
+    # 3. CLEAN AND PROCESS THE MESSAGE
     if chat_id is not None and text:
-        print(f"🤖 Processing: '{text}' from {user_name} in {chat_type}")
-        bot_reply = process_command(text, user_name)
+        # Clean the message (remove @bot mentions if present)
+        clean_text = clean_message_text(text, chat_type)
+        print(f"🤖 Processing: '{clean_text}' from {user_name}")
+        
+        bot_reply = process_command(clean_text, user_name)
         send_telegram_message(chat_id, bot_reply)
 
     # 4. ALWAYS RESPOND OK TO TELEGRAM
@@ -117,13 +140,4 @@ def webhook():
 
 @app.route('/', methods=['GET'])
 def index():
-    return "🤖 Ledger Bot is running with Hybrid Mode!"
-
-# Optional: Debug endpoint to check bot username
-@app.route('/debug', methods=['GET'])
-def debug():
-    return jsonify({
-        'bot_username_set': bool(TELEGRAM_BOT_USERNAME),
-        'bot_username': TELEGRAM_BOT_USERNAME,
-        'status': 'online'
-    })
+    return "🤖 Accounting Bot is running with Simple Hybrid Mode!"

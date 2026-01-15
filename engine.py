@@ -128,7 +128,7 @@ def get_balance():
             print(f"  ⚠️  {sheet_name}: Error reading - {str(e)}")
 
     print(f"📈 Final calculated balance: {balance:.2f}")
-    return f"💰 Current Balance: ${balance:.2f}"
+    return f"💰 Current Balance: ₵{balance:.2f}"
 
 def get_help_message():
     """Returns a comprehensive help message with examples."""
