@@ -7,6 +7,22 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
 
+# ==================== DEBUG ====================
+print("🟢 DEBUG: engine.py is starting...")
+print(f"🟢 DEBUG: SHEET_ID exists: {bool(os.environ.get('GOOGLE_SHEET_ID'))}")
+print(f"🟢 DEBUG: CREDENTIALS exist: {bool(os.environ.get('GOOGLE_CREDENTIALS'))}")
+
+# Add a test connection block
+try:
+    # Re-use your existing connection function
+    from . import get_google_sheets_client  # Adjust import if needed
+    test_client = get_google_sheets_client()
+    test_spreadsheet = test_client.open_by_key(os.environ.get('GOOGLE_SHEET_ID'))
+    print(f"✅ DEBUG: Test connection SUCCESS to: {test_spreadsheet.title}")
+except Exception as e:
+    print(f"❌ DEBUG: Test connection FAILED with error: {repr(e)}")
+# ==================== END DEBUG ====================
+
 # ==================== CONFIGURATION ====================
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
