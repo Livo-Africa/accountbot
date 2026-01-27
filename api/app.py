@@ -106,6 +106,7 @@ def index():
             </div>
             <p>Use Telegram to interact with the bot.</p>
             <p>Commands: +sale, +expense, balance, today, categories, delete, help</p>
+            <p><strong>NEW:</strong> Price training with +train, +forget, price_check, show_prices</p>
         </div>
     </body>
     </html>
@@ -118,7 +119,8 @@ def health():
     status = get_status()
     return jsonify({
         'status': 'healthy' if status['status'] == 'connected' else 'unhealthy',
-        'connected': status['status'] == 'connected'
+        'connected': status['status'] == 'connected',
+        'price_training': 'enabled'
     })
 
 if __name__ == '__main__':

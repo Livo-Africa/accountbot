@@ -1,9 +1,10 @@
-# engine.py - COMPLETE FIXED VERSION WITH ID SYSTEM
+# engine.py - COMPLETE FIXED VERSION WITH PRICE TRAINING SYSTEM
 import os
 import json
 import gspread
 import re
 import secrets
+import time
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -31,18 +32,272 @@ def generate_transaction_id(trans_type):
 
 def format_cedi(amount):
     """Format amount as Ghanaian Cedi with proper negative handling."""
-    if amount < 0:
-        return f"-₵{abs(amount):,.2f}"
-    return f"₵{amount:,.2f}"
+    try:
+        amount_float = float(amount)
+        if amount_float < 0:
+            return f"-₵{abs(amount_float):,.2f}"
+        return f"₵{amount_float:,.2f}"
+    except (ValueError, TypeError):
+        return f"₵{amount}"
 
 def find_column_index(headers, column_name):
     """Find column index safely."""
     if not headers:
         return -1
+    headers_lower = [h.lower().strip() for h in headers]
+    column_lower = column_name.lower().strip()
     try:
-        return headers.index(column_name.lower())
+        return headers_lower.index(column_lower)
     except ValueError:
         return -1
+
+# ==================== PRICE TRAINING SYSTEM ====================
+def ensure_price_ranges_sheet():
+    """Ensure PriceRanges sheet exists with proper structure."""
+    if not spreadsheet:
+        return False
+    
+    price_columns = ['Item', 'Type', 'Min_Price', 'Max_Price', 'Unit', 
+                    'Confidence', 'Trained_By', 'Last_Trained', 'Notes']
+    
+    try:
+        worksheet = spreadsheet.worksheet('PriceRanges')
+        current_headers = worksheet.row_values(1)
+        
+        # Check if all columns exist
+        if len(current_headers) < len(price_columns):
+            # Add missing columns
+            for i, col in enumerate(price_columns):
+                if i >= len(current_headers):
+                    worksheet.update_cell(1, i+1, col)
+        return True
+        
+    except gspread.exceptions.WorksheetNotFound:
+        # Create new sheet
+        worksheet = spreadsheet.add_worksheet(
+            title='PriceRanges',
+            rows=1000,
+            cols=len(price_columns)
+        )
+        worksheet.append_row(price_columns)
+        return True
+    except Exception:
+        return False
+
+def train_price(item_name, min_price, max_price, unit="", user_name="User"):
+    """Train the bot on price ranges for items/categories."""
+    if not ensure_price_ranges_sheet():
+        return "❌ Cannot access PriceRanges sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('PriceRanges')
+        all_rows = worksheet.get_all_values()
+        
+        # Check if item already exists
+        item_lower = item_name.strip().lower()
+        row_index = None
+        
+        for i, row in enumerate(all_rows[1:], start=2):
+            if row and len(row) > 0 and row[0].strip().lower() == item_lower:
+                row_index = i
+                break
+        
+        # Determine type (item or category)
+        item_type = "category" if item_name.startswith("#") else "item"
+        
+        # Prepare training data
+        training_data = [
+            item_name.strip(),
+            item_type,
+            float(min_price),
+            float(max_price),
+            unit.strip(),
+            85,  # Initial confidence
+            user_name,
+            datetime.now().strftime('%Y-%m-%d'),
+            f"Trained by {user_name}"
+        ]
+        
+        if row_index:
+            # Update existing row
+            for col, value in enumerate(training_data, start=1):
+                worksheet.update_cell(row_index, col, value)
+            action = "updated"
+        else:
+            # Add new row
+            worksheet.append_row(training_data)
+            action = "added"
+        
+        return f"✅ {action.capitalize()} price range for '{item_name}': ₵{min_price:,.2f} - ₵{max_price:,.2f}" + \
+               (f" {unit}" if unit else "")
+        
+    except Exception as e:
+        return f"❌ Training failed: {str(e)[:100]}"
+
+def forget_price(item_name):
+    """Remove price training for an item."""
+    try:
+        worksheet = spreadsheet.worksheet('PriceRanges')
+        all_rows = worksheet.get_all_values()
+        
+        item_lower = item_name.strip().lower()
+        rows_to_delete = []
+        
+        for i, row in enumerate(all_rows[1:], start=2):
+            if row and len(row) > 0 and row[0].strip().lower() == item_lower:
+                rows_to_delete.append(i)
+        
+        if not rows_to_delete:
+            return f"❌ No price training found for '{item_name}'"
+        
+        # Delete from bottom to maintain indices
+        for row in sorted(rows_to_delete, reverse=True):
+            worksheet.delete_rows(row)
+        
+        return f"✅ Forgot price training for '{item_name}'"
+        
+    except gspread.exceptions.WorksheetNotFound:
+        return f"❌ No price training found for '{item_name}'"
+    except Exception as e:
+        return f"❌ Error: {str(e)[:100]}"
+
+def check_price(item_name, amount):
+    """Check if amount is within trained price range."""
+    try:
+        worksheet = spreadsheet.worksheet('PriceRanges')
+        all_rows = worksheet.get_all_values()
+        
+        item_lower = item_name.strip().lower()
+        matches = []
+        
+        # Search for exact matches
+        for row in all_rows[1:]:
+            if row and len(row) > 0 and row[0].strip().lower() == item_lower:
+                try:
+                    min_price = float(row[2]) if len(row) > 2 and row[2] else 0
+                    max_price = float(row[3]) if len(row) > 3 and row[3] else float('inf')
+                    unit = row[4] if len(row) > 4 else ""
+                    confidence = int(row[5]) if len(row) > 5 and row[5] else 50
+                    
+                    matches.append({
+                        'item': row[0],
+                        'min': min_price,
+                        'max': max_price,
+                        'unit': unit,
+                        'confidence': confidence
+                    })
+                except (ValueError, IndexError):
+                    continue
+        
+        if not matches:
+            return None
+        
+        # Return the best match (highest confidence)
+        best_match = max(matches, key=lambda x: x['confidence'])
+        
+        try:
+            amount_float = float(amount)
+        except ValueError:
+            return None
+        
+        if amount_float < best_match['min']:
+            return {
+                'status': 'below',
+                'range': best_match,
+                'difference': best_match['min'] - amount_float
+            }
+        elif amount_float > best_match['max']:
+            return {
+                'status': 'above',
+                'range': best_match,
+                'difference': amount_float - best_match['max']
+            }
+        else:
+            return {
+                'status': 'within',
+                'range': best_match
+            }
+        
+    except Exception:
+        return None
+
+def list_trained_items():
+    """List all trained price ranges."""
+    try:
+        worksheet = spreadsheet.worksheet('PriceRanges')
+        all_rows = worksheet.get_all_values()
+        
+        if len(all_rows) <= 1:
+            return "📭 No items have been trained yet. Use `+train` to add price ranges."
+        
+        items = []
+        for row in all_rows[1:]:
+            if row and row[0]:
+                try:
+                    items.append({
+                        'name': row[0],
+                        'min': float(row[2]) if len(row) > 2 and row[2] else 0,
+                        'max': float(row[3]) if len(row) > 3 and row[3] else 0,
+                        'unit': row[4] if len(row) > 4 else "",
+                        'confidence': int(row[5]) if len(row) > 5 and row[5] else 50,
+                        'trained_by': row[6] if len(row) > 6 else "Unknown",
+                        'last_trained': row[7] if len(row) > 7 else "Unknown"
+                    })
+                except (ValueError, IndexError):
+                    continue
+        
+        if not items:
+            return "📭 No valid price training found."
+        
+        # Sort by confidence (highest first)
+        items.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        response = "📚 **TRAINED PRICE RANGES:**\n\n"
+        
+        for i, item in enumerate(items[:15], 1):  # Show top 15
+            emoji = "✅" if item['confidence'] > 80 else "⚠️" if item['confidence'] > 60 else "🤔"
+            response += f"{emoji} **{item['name']}**: ₵{item['min']:,.2f} - ₵{item['max']:,.2f}"
+            if item['unit']:
+                response += f" {item['unit']}"
+            response += f"\n   Confidence: {item['confidence']}% | Trained by: {item['trained_by']}\n\n"
+        
+        if len(items) > 15:
+            response += f"📋 Showing 15 of {len(items)} items. Use `price_check [item]` for details."
+        
+        return response
+        
+    except gspread.exceptions.WorksheetNotFound:
+        return "📭 No price training data found. Use `+train` to start training."
+    except Exception:
+        return "❌ Cannot access PriceRanges sheet."
+
+def auto_detect_items_in_description(description):
+    """Automatically detect trained items in a description."""
+    try:
+        worksheet = spreadsheet.worksheet('PriceRanges')
+        all_rows = worksheet.get_all_values()
+        
+        detected = []
+        description_lower = description.lower()
+        
+        for row in all_rows[1:]:
+            if row and row[0]:
+                item_lower = row[0].lower()
+                # Simple word matching (could be improved)
+                if item_lower in description_lower or f" {item_lower} " in f" {description_lower} ":
+                    try:
+                        detected.append({
+                            'item': row[0],
+                            'min': float(row[2]) if len(row) > 2 and row[2] else 0,
+                            'max': float(row[3]) if len(row) > 3 and row[3] else 0,
+                            'unit': row[4] if len(row) > 4 else ""
+                        })
+                    except (ValueError, IndexError):
+                        continue
+        
+        return detected
+    except Exception:
+        return []
 
 # ==================== CONNECTION & SHEET MANAGEMENT ====================
 def get_google_sheets_client():
@@ -75,6 +330,9 @@ def initialize_spreadsheet_connection():
         
         # Ensure all sheets have proper structure
         ensure_sheet_structures()
+        
+        # Initialize price ranges sheet
+        ensure_price_ranges_sheet()
         
     except Exception as e:
         print(f"Connection failed: {e}")
@@ -135,7 +393,7 @@ initialize_spreadsheet_connection()
 
 # ==================== TRANSACTION FUNCTIONS ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
-    """Record a transaction with unique ID."""
+    """Record a transaction with unique ID and price checking."""
     if not spreadsheet:
         return "❌ Bot error: Not connected to database."
     
@@ -159,6 +417,27 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             clean_description = re.sub(r'#\w+', '', description).strip()
             clean_description = re.sub(r'\s+', ' ', clean_description)
         
+        # Check for price warnings
+        price_warnings = []
+        
+        # 1. Check if the exact item is trained
+        detected_items = auto_detect_items_in_description(clean_description)
+        
+        for item in detected_items:
+            price_check = check_price(item['item'], amount)
+            if price_check and price_check['status'] != 'within':
+                if price_check['status'] == 'above':
+                    price_warnings.append(f"⚠️ **{item['item']}** is usually ₵{item['min']:,.2f}-₵{item['max']:,.2f} (your price: ₵{float(amount):,.2f})")
+                elif price_check['status'] == 'below':
+                    price_warnings.append(f"⚠️ **{item['item']}** is usually ₵{item['min']:,.2f}-₵{item['max']:,.2f} (your price: ₵{float(amount):,.2f} seems low)")
+        
+        # 2. Check category if present
+        if category:
+            price_check = check_price(f"#{category}", amount)
+            if price_check and price_check['status'] != 'within':
+                if price_check['status'] == 'above':
+                    price_warnings.append(f"⚠️ **#{category}** expenses are usually ₵{price_check['range']['min']:,.2f}-₵{price_check['range']['max']:,.2f}")
+        
         # Prepare row with ID
         row = [
             transaction_id,                           # ID
@@ -177,6 +456,11 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
         if category:
             response += f" in category: #{category}"
         response += f"\n📝 **ID:** `{transaction_id}`"
+        
+        # Add price warnings if any
+        if price_warnings:
+            response += "\n\n" + "\n".join(price_warnings)
+            response += "\n\n💡 If this is correct, the bot will learn from it!"
         
         return response
         
@@ -630,6 +914,13 @@ def get_date_range(period):
     
     return None, None
 
+def get_status():
+    """Get bot status information."""
+    return {
+        'status': 'connected' if spreadsheet else 'disconnected',
+        'price_training': 'enabled'
+    }
+
 # ==================== COMMAND PROCESSOR ====================
 def get_help_message():
     """Returns comprehensive help message."""
@@ -643,26 +934,34 @@ def get_help_message():
 • `+income [amount] [description]`
   Example: `+income 1000 Investment #investment`
 
+**💰 PRICE TRAINING (NEW!):**
+• `+train "item" min max [unit]`
+  Example: `+train "printer paper" 60 80 per ream`
+• `+train #category min max`
+  Example: `+train #office_supplies 50 150`
+• `+forget "item"` - Remove price training
+• `price_check "item"` - Check price range
+• `show_prices` - List all trained items
+
 **📊 VIEW FINANCES:**
-• `balance` - Current profit/loss (shows negative if in debt)
+• `balance` - Current profit/loss
 • `today` - Today's summary
 • `week` - Weekly report
 • `month` - Monthly report
 • `categories` - Category breakdown
-• `list` - Your recent transactions with IDs
+• `list` - Your recent transactions
 
 **🗑️  SMART DELETION:**
 • `/delete` - Show deletion options
-• `/delete ID:XXX-XXX` - Delete by ID (shown when recording)
-• `/delete last` - Delete most recent transaction
-• `/delete list` - List your transactions with IDs
+• `/delete ID:XXX-XXX` - Delete by ID
+• `/delete last` - Delete most recent
+• `/delete list` - List your transactions
 
 **📝 EXAMPLES:**
-• `+expense 300 #marketing Facebook ads`
-  → Shows ID like `EXP-ABC123`
-• `list` - See your transactions
-• `/delete ID:EXP-ABC123` - Delete that transaction
-• `balance` - Check current balance
+• `+train "lunch" 20 50 per person`
+• `+expense 300 printer paper`
+• Bot warns if price is unusual!
+• `show_prices` - See all trained items
 
 Need help? Just type `help`!"""
 
@@ -684,8 +983,110 @@ def process_command(user_input, user_name="User"):
     # Clean punctuation
     text_lower = re.sub(r'^[:\s]+|[:\s]+$', '', text_lower)
 
+    # ==================== PRICE TRAINING COMMANDS ====================
+    
+    # Train Price
+    if text_lower.startswith('+train'):
+        parts = text.split()
+        if len(parts) < 4:
+            return """📚 **PRICE TRAINING HELP**
+            
+Format: `+train "item" min max [unit]`
+            
+Examples:
+• `+train "printer paper" 60 80 per ream`
+• `+train #office_supplies 50 150`
+• `+train "web design" 500 2000 per project`
+            
+💡 Use quotes for multi-word items!"""
+        
+        try:
+            # Parse the command
+            # Handle quoted items
+            if '"' in text:
+                # Find quoted item name
+                match = re.search(r'"([^"]+)"', text)
+                if match:
+                    item_name = match.group(1)
+                    # Remove quoted part from text
+                    remaining = text.replace(f'"{item_name}"', '').strip()
+                    parts = remaining.split()
+                else:
+                    item_name = parts[1]
+                    parts = parts[2:]
+            else:
+                item_name = parts[1]
+                parts = parts[2:]
+            
+            if len(parts) < 2:
+                return "❌ Please specify both minimum and maximum prices."
+            
+            min_price = float(parts[0])
+            max_price = float(parts[1])
+            
+            # Get unit (optional)
+            unit = ' '.join(parts[2:]) if len(parts) > 2 else ""
+            
+            if min_price >= max_price:
+                return "❌ Minimum price must be less than maximum price."
+            
+            if max_price > 10000000:  # 10 million cedis sanity check
+                return "❌ Price seems unrealistic. Please check the amount."
+            
+            return train_price(item_name, min_price, max_price, unit, user_name)
+            
+        except ValueError:
+            return "❌ Invalid price format. Use numbers like: 60 80"
+        except IndexError:
+            return "❌ Please specify both minimum and maximum prices."
+
+    # Forget Price
+    elif text_lower.startswith('+forget'):
+        parts = text.split()
+        if len(parts) < 2:
+            return "❌ Format: +forget [item]\nExample: +forget \"printer paper\""
+        
+        item_name = ' '.join(parts[1:])
+        # Remove quotes if present
+        if item_name.startswith('"') and item_name.endswith('"'):
+            item_name = item_name[1:-1]
+        
+        return forget_price(item_name)
+
+    # Price Check
+    elif text_lower.startswith('price_check'):
+        parts = text.split()
+        if len(parts) < 2:
+            return "❌ Format: price_check [item]\nExample: price_check \"printer paper\""
+        
+        item_name = ' '.join(parts[1:])
+        # Remove quotes if present
+        if item_name.startswith('"') and item_name.endswith('"'):
+            item_name = item_name[1:-1]
+        
+        price_info = check_price(item_name, 0)  # Check without amount
+        
+        if not price_info:
+            return f"❌ No price training found for '{item_name}'"
+        
+        range_info = price_info['range']
+        
+        response = f"💰 **PRICE CHECK: {range_info['item']}**\n\n"
+        response += f"Expected Range: ₵{range_info['min']:,.2f} - ₵{range_info['max']:,.2f}"
+        if range_info['unit']:
+            response += f" {range_info['unit']}"
+        response += f"\nConfidence: {range_info['confidence']}%"
+        
+        return response
+
+    # Show Prices
+    elif text_lower in ['show_prices', 'list_prices', 'trained_items', 'prices']:
+        return list_trained_items()
+
+    # ==================== ORIGINAL TRANSACTION COMMANDS ====================
+    
     # Record Sale
-    if text_lower.startswith('+sale'):
+    elif text_lower.startswith('+sale'):
         parts = text.split()
         if len(parts) < 3:
             return "❌ Format: +sale [amount] [description]\nExample: +sale 500 Website design #web"
@@ -790,7 +1191,8 @@ Delete: `/delete ID:EXP-ABC123`"""
 
 **Try:**
 • Record: `+sale 500 Project #client`
-• Check: `balance`, `today`, `list`
+• Train: `+train "item" 100 200`
+• Check: `balance`, `today`, `show_prices`
 • Delete: `/delete` (shows options)
 • Help: `help`
 
