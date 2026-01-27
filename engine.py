@@ -1,13 +1,13 @@
-# engine.py - COMPLETE FIXED VERSION WITH PRICE TRAINING SYSTEM
+# engine.py - COMPLETE WITH FIXED TRAIN COMMAND AND CONVERSATION
 import os
 import json
 import gspread
 import re
 import secrets
-import time
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
+from conversation import conversation_agent, nlp_processor
 
 # ==================== CONFIGURATION ====================
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -128,11 +128,14 @@ def train_price(item_name, min_price, max_price, unit="", user_name="User"):
             worksheet.append_row(training_data)
             action = "added"
         
-        return f"✅ {action.capitalize()} price range for '{item_name}': ₵{min_price:,.2f} - ₵{max_price:,.2f}" + \
+        response = f"✅ {action.capitalize()} price range for '{item_name}': ₵{min_price:,.2f} - ₵{max_price:,.2f}" + \
                (f" {unit}" if unit else "")
         
+        # Enhance with conversation
+        return conversation_agent.enhance_transaction_response(response, 'success')
+        
     except Exception as e:
-        return f"❌ Training failed: {str(e)[:100]}"
+        return f"❌ Training failed: {str(e)}"
 
 def forget_price(item_name):
     """Remove price training for an item."""
@@ -154,12 +157,13 @@ def forget_price(item_name):
         for row in sorted(rows_to_delete, reverse=True):
             worksheet.delete_rows(row)
         
-        return f"✅ Forgot price training for '{item_name}'"
+        response = f"✅ Forgot price training for '{item_name}'"
+        return conversation_agent.enhance_transaction_response(response, 'success')
         
     except gspread.exceptions.WorksheetNotFound:
         return f"❌ No price training found for '{item_name}'"
     except Exception as e:
-        return f"❌ Error: {str(e)[:100]}"
+        return f"❌ Error: {str(e)}"
 
 def check_price(item_name, amount):
     """Check if amount is within trained price range."""
@@ -298,6 +302,68 @@ def auto_detect_items_in_description(description):
         return detected
     except Exception:
         return []
+
+# ==================== FIXED TRAIN COMMAND PARSER ====================
+def parse_train_command(text):
+    """Parse +train command with proper handling of quotes and units."""
+    # Remove the +train prefix
+    text = text.strip()
+    if text.lower().startswith('+train'):
+        text = text[6:].strip()
+    
+    # Handle quoted item names
+    item_name = None
+    remaining = text
+    
+    # Check if text starts with a quote
+    if text.startswith('"'):
+        # Find the closing quote
+        end_quote = text.find('"', 1)
+        if end_quote != -1:
+            item_name = text[1:end_quote]
+            remaining = text[end_quote+1:].strip()
+    elif text.startswith("'"):
+        # Find the closing single quote
+        end_quote = text.find("'", 1)
+        if end_quote != -1:
+            item_name = text[1:end_quote]
+            remaining = text[end_quote+1:].strip()
+    else:
+        # No quotes, take first word as item name
+        parts = text.split()
+        if len(parts) >= 3:  # Need at least item name and two numbers
+            item_name = parts[0]
+            remaining = ' '.join(parts[1:])
+    
+    if not item_name:
+        return None, None, None, "❌ Could not parse item name. Use quotes for multi-word items."
+    
+    # Parse numbers from remaining text
+    parts = remaining.split()
+    
+    # Find the first two numbers
+    numbers = []
+    unit_parts = []
+    
+    for part in parts:
+        # Try to parse as float
+        try:
+            num = float(part)
+            if len(numbers) < 2:
+                numbers.append(num)
+            else:
+                unit_parts.append(part)
+        except ValueError:
+            unit_parts.append(part)
+    
+    if len(numbers) < 2:
+        return None, None, None, "❌ Please provide both minimum and maximum prices."
+    
+    min_price = numbers[0]
+    max_price = numbers[1]
+    unit = ' '.join(unit_parts) if unit_parts else ""
+    
+    return item_name, min_price, max_price, unit
 
 # ==================== CONNECTION & SHEET MANAGEMENT ====================
 def get_google_sheets_client():
@@ -462,10 +528,15 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             response += "\n\n" + "\n".join(price_warnings)
             response += "\n\n💡 If this is correct, the bot will learn from it!"
         
-        return response
+        # Enhance with conversation
+        enhanced_response = conversation_agent.enhance_transaction_response(response, trans_type)
+        enhanced_response = conversation_agent.add_personality(enhanced_response, user_name)
+        
+        return enhanced_response
         
     except Exception as e:
-        return f"❌ Failed to save: {str(e)[:100]}"
+        error_response = f"❌ Failed to save: {str(e)[:100]}"
+        return conversation_agent.enhance_transaction_response(error_response, 'error')
 
 def get_transactions(sheet_name, start_date=None, end_date=None, user_filter=None):
     """Get transactions from a sheet with optional filtering."""
@@ -675,10 +746,12 @@ def delete_transaction_by_id(transaction_id, user_name):
         # Delete from original sheet
         original_sheet.delete_rows(row_index)
         
-        return f"✅ Deleted transaction `{transaction_id}` ({format_cedi(transaction['amount'])})"
+        response = f"✅ Deleted transaction `{transaction_id}` ({format_cedi(transaction['amount'])})"
+        return conversation_agent.enhance_transaction_response(response, 'success')
         
     except Exception as e:
-        return f"❌ Failed to delete: {str(e)[:100]}"
+        error_response = f"❌ Failed to delete: {str(e)[:100]}"
+        return conversation_agent.enhance_transaction_response(error_response, 'error')
 
 def archive_deleted_transaction(transaction, deleted_by):
     """Move transaction to DeletedTransactions tab."""
@@ -764,12 +837,14 @@ def delete_old_transaction(transaction, user_name):
                 # Delete
                 original_sheet.delete_rows(i)
                 
-                return f"✅ Deleted old transaction ({format_cedi(transaction['amount'])})"
+                response = f"✅ Deleted old transaction ({format_cedi(transaction['amount'])})"
+                return conversation_agent.enhance_transaction_response(response, 'success')
         
         return "❌ Could not find matching transaction."
         
     except Exception as e:
-        return f"❌ Failed to delete old transaction: {str(e)[:100]}"
+        error_response = f"❌ Failed to delete old transaction: {str(e)[:100]}"
+        return conversation_agent.enhance_transaction_response(error_response, 'error')
 
 # ==================== REPORT FUNCTIONS ====================
 def get_today_summary():
@@ -918,30 +993,33 @@ def get_status():
     """Get bot status information."""
     return {
         'status': 'connected' if spreadsheet else 'disconnected',
-        'price_training': 'enabled'
+        'price_training': 'enabled',
+        'conversational_ai': 'enabled'
     }
 
-# ==================== COMMAND PROCESSOR ====================
+# ==================== CONVERSATIONAL COMMAND PROCESSOR ====================
 def get_help_message():
     """Returns comprehensive help message."""
     return """📖 **LEDGER BOT COMMANDS**
 
 **💼 RECORD TRANSACTIONS:**
 • `+sale [amount] [description]`
-  Example: `+sale 500 Website design #web`
 • `+expense [amount] [description]`
-  Example: `+expense 100 Office supplies #office`
 • `+income [amount] [description]`
-  Example: `+income 1000 Investment #investment`
 
-**💰 PRICE TRAINING (NEW!):**
+**🗣️ NATURAL LANGUAGE (NEW!):**
+• "I spent 100 on lunch"
+• "Made 500 from client"
+• "Paid 200 for electricity"
+• "What's my balance today?"
+• "How much did I spend this week?"
+
+**💰 PRICE TRAINING:**
 • `+train "item" min max [unit]`
-  Example: `+train "printer paper" 60 80 per ream`
-• `+train #category min max`
-  Example: `+train #office_supplies 50 150`
-• `+forget "item"` - Remove price training
-• `price_check "item"` - Check price range
-• `show_prices` - List all trained items
+  Example: `+train "birthday basic" 40 45 per package`
+• `+forget "item"`
+• `price_check "item"`
+• `show_prices`
 
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss
@@ -957,18 +1035,18 @@ def get_help_message():
 • `/delete last` - Delete most recent
 • `/delete list` - List your transactions
 
-**📝 EXAMPLES:**
+**💡 EXAMPLES:**
 • `+train "lunch" 20 50 per person`
-• `+expense 300 printer paper`
-• Bot warns if price is unusual!
+• "I spent 300 on printer paper"
+• Bot will warn if price is unusual!
 • `show_prices` - See all trained items
 
-Need help? Just type `help`!"""
+Need help? Just type `help` or ask naturally!"""
 
-def process_command(user_input, user_name="User"):
-    """Main command processor."""
+def process_command_with_conversation(user_input, user_name="User", user_id=None):
+    """Main command processor with conversation support."""
     if not user_input:
-        return "🤔 Please enter a command."
+        return "🤔 Please enter a command or ask me something."
     
     text = user_input.strip()
     text_lower = text.lower()
@@ -982,63 +1060,73 @@ def process_command(user_input, user_name="User"):
 
     # Clean punctuation
     text_lower = re.sub(r'^[:\s]+|[:\s]+$', '', text_lower)
+    
+    # ==================== CONVERSATION FIRST ====================
+    
+    # 1. Check for conversational intent
+    intent = conversation_agent.detect_intent(text)
+    conversational_response = conversation_agent.generate_response(intent, user_name)
+    
+    if conversational_response:
+        return conversation_agent.add_personality(conversational_response, user_name)
+    
+    # 2. Try natural language transaction parsing
+    transaction_details = conversation_agent.extract_transaction_details(text)
+    if transaction_details and transaction_details['confidence'] > 0.6:
+        # We have a natural language transaction!
+        trans_type = transaction_details['type']
+        amount = transaction_details['amount']
+        description = transaction_details['description']
+        
+        # Add hashtag extraction from description
+        hashtags = re.findall(r'#(\w+)', description)
+        if hashtags:
+            # Remove hashtags from description
+            description = re.sub(r'#\w+', '', description).strip()
+            description = re.sub(r'\s+', ' ', description)
+        
+        # Record the transaction
+        return record_transaction(trans_type, amount, description, user_name)
+    
+    # 3. Try natural language command parsing
+    nl_command = nlp_processor.parse_to_command(text)
+    if nl_command:
+        # Process the natural language command
+        return process_basic_command(nl_command, user_name, text_lower)
+    
+    # ==================== BASIC COMMANDS (Original System) ====================
+    return process_basic_command(text, user_name, text_lower)
 
+def process_basic_command(text, user_name, text_lower=None):
+    """Process basic commands (original system)."""
+    if text_lower is None:
+        text_lower = text.lower()
+    
     # ==================== PRICE TRAINING COMMANDS ====================
     
-    # Train Price
+    # Train Price - USING FIXED PARSER
     if text_lower.startswith('+train'):
-        parts = text.split()
-        if len(parts) < 4:
-            return """📚 **PRICE TRAINING HELP**
-            
-Format: `+train "item" min max [unit]`
-            
-Examples:
-• `+train "printer paper" 60 80 per ream`
-• `+train #office_supplies 50 150`
-• `+train "web design" 500 2000 per project`
-            
-💡 Use quotes for multi-word items!"""
+        # Use the fixed parser function
+        item_name, min_price, max_price, unit = parse_train_command(text)
         
+        if item_name is None:
+            # Error message is in the min_price variable
+            return min_price  # This contains the error message
+        
+        # Validate the prices
         try:
-            # Parse the command
-            # Handle quoted items
-            if '"' in text:
-                # Find quoted item name
-                match = re.search(r'"([^"]+)"', text)
-                if match:
-                    item_name = match.group(1)
-                    # Remove quoted part from text
-                    remaining = text.replace(f'"{item_name}"', '').strip()
-                    parts = remaining.split()
-                else:
-                    item_name = parts[1]
-                    parts = parts[2:]
-            else:
-                item_name = parts[1]
-                parts = parts[2:]
-            
-            if len(parts) < 2:
-                return "❌ Please specify both minimum and maximum prices."
-            
-            min_price = float(parts[0])
-            max_price = float(parts[1])
-            
-            # Get unit (optional)
-            unit = ' '.join(parts[2:]) if len(parts) > 2 else ""
-            
-            if min_price >= max_price:
-                return "❌ Minimum price must be less than maximum price."
-            
-            if max_price > 10000000:  # 10 million cedis sanity check
-                return "❌ Price seems unrealistic. Please check the amount."
-            
-            return train_price(item_name, min_price, max_price, unit, user_name)
-            
-        except ValueError:
-            return "❌ Invalid price format. Use numbers like: 60 80"
-        except IndexError:
-            return "❌ Please specify both minimum and maximum prices."
+            min_price = float(min_price)
+            max_price = float(max_price)
+        except (ValueError, TypeError):
+            return "❌ Invalid price format. Use numbers like: 40 45"
+        
+        if min_price >= max_price:
+            return "❌ Minimum price must be less than maximum price."
+        
+        if max_price > 10000000:  # 10 million cedis sanity check
+            return "❌ Price seems unrealistic. Please check the amount."
+        
+        return train_price(item_name, min_price, max_price, unit, user_name)
 
     # Forget Price
     elif text_lower.startswith('+forget'):
@@ -1077,7 +1165,7 @@ Examples:
             response += f" {range_info['unit']}"
         response += f"\nConfidence: {range_info['confidence']}%"
         
-        return response
+        return conversation_agent.add_personality(response, user_name)
 
     # Show Prices
     elif text_lower in ['show_prices', 'list_prices', 'trained_items', 'prices']:
@@ -1123,52 +1211,63 @@ Examples:
 
     # Check Balance
     elif text_lower in ['balance', 'profit', 'net']:
-        return get_balance()
+        balance_response = get_balance()
+        return conversation_agent.add_personality(balance_response, user_name)
 
     # Today's Summary
     elif text_lower in ['today', 'today?', 'today.']:
-        return get_today_summary()
+        today_response = get_today_summary()
+        return conversation_agent.add_personality(today_response, user_name)
 
     # Week Summary
     elif text_lower in ['week', 'weekly', 'this week']:
-        return get_period_summary('week')
+        week_response = get_period_summary('week')
+        return conversation_agent.add_personality(week_response, user_name)
 
     # Month Summary
     elif text_lower in ['month', 'monthly', 'this month']:
-        return get_period_summary('month')
+        month_response = get_period_summary('month')
+        return conversation_agent.add_personality(month_response, user_name)
 
     # Categories Report
     elif text_lower in ['categories', 'category', '/categories']:
-        return get_categories_report()
+        categories_response = get_categories_report()
+        return conversation_agent.add_personality(categories_response, user_name)
 
     # List Transactions
     elif text_lower in ['list', 'transactions', '/list']:
         try:
             parts = text_lower.split()
             limit = int(parts[1]) if len(parts) > 1 else 10
-            return list_user_transactions(user_name, limit=min(limit, 20))
+            list_response = list_user_transactions(user_name, limit=min(limit, 20))
         except:
-            return list_user_transactions(user_name, limit=10)
+            list_response = list_user_transactions(user_name, limit=10)
+        
+        return conversation_agent.add_personality(list_response, user_name)
 
     # Smart Deletion
     elif text_lower.startswith('delete') or text_lower.startswith('/delete'):
         delete_part = text_lower.replace('delete', '', 1).replace('/', '', 1).strip()
         
         if not delete_part:
-            return list_user_transactions(user_name, limit=5)
+            list_response = list_user_transactions(user_name, limit=5)
+            return conversation_agent.add_personality(list_response, user_name)
         
         elif delete_part == 'last':
-            return delete_last_transaction(user_name)
+            delete_response = delete_last_transaction(user_name)
+            return conversation_agent.add_personality(delete_response, user_name)
         
         elif delete_part.startswith('id:'):
             transaction_id = delete_part[3:].strip().upper()
-            return delete_transaction_by_id(transaction_id, user_name)
+            delete_response = delete_transaction_by_id(transaction_id, user_name)
+            return conversation_agent.add_personality(delete_response, user_name)
         
         elif delete_part == 'list':
-            return list_user_transactions(user_name, limit=10)
+            list_response = list_user_transactions(user_name, limit=10)
+            return conversation_agent.add_personality(list_response, user_name)
         
         else:
-            return """🗑️ **DELETION HELP**
+            delete_help = """🗑️ **DELETION HELP**
 
 **OPTIONS:**
 • `/delete` - Show recent transactions
@@ -1180,20 +1279,31 @@ Examples:
 Record: `+expense 500 Test`
 → Shows: "Recorded... ID: EXP-ABC123"
 Delete: `/delete ID:EXP-ABC123`"""
+            
+            return conversation_agent.add_personality(delete_help, user_name)
 
     # Help
     elif text_lower in ['help', '/start', '/help', 'commands', 'menu']:
-        return get_help_message()
+        help_response = get_help_message()
+        return conversation_agent.add_personality(help_response, user_name)
 
     # Unknown
     else:
-        return f"""🤔 Command not recognized.
+        unknown_response = f"""🤔 Command not recognized.
 
 **Try:**
 • Record: `+sale 500 Project #client`
-• Train: `+train "item" 100 200`
+• Ask naturally: "I spent 100 on lunch"
+• Train: `+train "birthday basic" 40 45 per package`
 • Check: `balance`, `today`, `show_prices`
 • Delete: `/delete` (shows options)
 • Help: `help`
 
 Type `help` for complete list!"""
+        
+        return conversation_agent.add_personality(unknown_response, user_name)
+
+# Keep original process_command for backward compatibility
+def process_command(user_input, user_name="User"):
+    """Original command processor (for backward compatibility)."""
+    return process_command_with_conversation(user_input, user_name)

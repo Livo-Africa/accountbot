@@ -1,10 +1,10 @@
-# api/app.py - SECURE VERSION (No Information Exposure)
+# api/app.py - UPDATED FOR CONVERSATION
 from flask import Flask, request, jsonify
 import os
 import json
 import urllib.request
 import re
-from engine import process_command, BOT_USERNAME
+from engine import process_command_with_conversation, BOT_USERNAME, get_status
 
 app = Flask(__name__)
 
@@ -15,7 +15,7 @@ if not TELEGRAM_TOKEN:
 def send_telegram_message(chat_id, text):
     """Sends a message back to Telegram."""
     url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage'
-    data = json.dumps({'chat_id': chat_id, 'text': text})
+    data = json.dumps({'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'})
     req = urllib.request.Request(url, data=data.encode('utf-8'),
                                headers={'Content-Type': 'application/json'})
     try:
@@ -53,6 +53,7 @@ def webhook():
     chat_id = None
     text = ""
     user_name = "User"
+    user_id = None
 
     # 1. CHECK FOR A TEXT MESSAGE
     if 'message' in update and 'text' in update['message']:
@@ -61,13 +62,15 @@ def webhook():
         chat_type = message['chat']['type']
         text = message.get('text', '').strip()
         user_name = message['from'].get('first_name', 'User')
+        user_id = str(message['from'].get('id', ''))
         
         # Clean the message (remove @bot mentions if present)
         clean_text = clean_message_text(text)
         
-        # Process EVERY message through the engine
+        # Process EVERY message through the enhanced engine
         if chat_id is not None and clean_text:
-            bot_reply = process_command(clean_text, user_name)
+            # Use the conversational processor
+            bot_reply = process_command_with_conversation(clean_text, user_name, user_id)
             
             # Only send response if the engine returned something meaningful
             if bot_reply and not bot_reply.startswith("🤔 Command not recognized"):
@@ -96,6 +99,8 @@ def index():
             body { font-family: Arial, sans-serif; margin: 40px; text-align: center; }
             .container { max-width: 600px; margin: 0 auto; }
             .status { background: #4CAF50; color: white; padding: 10px; border-radius: 5px; }
+            .features { text-align: left; margin: 20px 0; }
+            .feature { background: #f5f5f5; padding: 10px; margin: 5px 0; border-radius: 5px; }
         </style>
     </head>
     <body>
@@ -104,9 +109,18 @@ def index():
             <div class="status">
                 ✅ Bot is running and connected
             </div>
-            <p>Use Telegram to interact with the bot.</p>
-            <p>Commands: +sale, +expense, balance, today, categories, delete, help</p>
-            <p><strong>NEW:</strong> Price training with +train, +forget, price_check, show_prices</p>
+            
+            <div class="features">
+                <h3>🌟 Features:</h3>
+                <div class="feature">💰 <strong>Price Training</strong> - Learn item prices</div>
+                <div class="feature">💬 <strong>Conversational AI</strong> - Natural language support</div>
+                <div class="feature">📊 <strong>Financial Reports</strong> - Balance, today, week, month</div>
+                <div class="feature">🏷️ <strong>Smart Categorization</strong> - Automatic with #hashtags</div>
+                <div class="feature">🗑️ <strong>Safe Deletion</strong> - ID-based transaction removal</div>
+            </div>
+            
+            <p>Use Telegram to interact with the bot naturally!</p>
+            <p><strong>Try saying:</strong> "I spent 100 on lunch" or "What's my balance today?"</p>
         </div>
     </body>
     </html>
@@ -114,13 +128,14 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    """Health check endpoint (minimal information)."""
-    from engine import get_status
+    """Health check endpoint."""
     status = get_status()
     return jsonify({
         'status': 'healthy' if status['status'] == 'connected' else 'unhealthy',
         'connected': status['status'] == 'connected',
-        'price_training': 'enabled'
+        'price_training': 'enabled',
+        'conversational_ai': 'enabled',
+        'version': '2.0.0'
     })
 
 if __name__ == '__main__':
