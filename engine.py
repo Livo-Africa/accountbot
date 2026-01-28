@@ -1,9 +1,10 @@
-# engine.py - COMPLETE FIXED VERSION WITH PROPER HELP SYSTEM
+# engine.py - COMPLETE FIXED VERSION WITH PHASE 1 FEATURES
 import os
 import json
 import gspread
 import re
 import secrets
+import time
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -49,6 +50,181 @@ def find_column_index(headers, column_name):
         return headers_lower.index(column_lower)
     except ValueError:
         return -1
+
+# ==================== INTERACTIVE PRICE CORRECTION SYSTEM ====================
+class CorrectionState:
+    """Manages interactive price correction states"""
+    
+    def __init__(self):
+        self.states = {}
+    
+    def add_correction(self, user_id, transaction_id, item, amount, min_price, max_price, sheet_name, row_data):
+        """Store a pending correction"""
+        state_id = f"{user_id}_{int(time.time())}"
+        self.states[state_id] = {
+            'user_id': user_id,
+            'transaction_id': transaction_id,
+            'item': item,
+            'amount': amount,
+            'min_price': min_price,
+            'max_price': max_price,
+            'sheet_name': sheet_name,
+            'row_data': row_data,
+            'timestamp': time.time(),
+            'expires_at': time.time() + 300  # 5 minutes expiry
+        }
+        # Clean up old states
+        self.cleanup()
+        return state_id
+    
+    def get_correction(self, state_id):
+        """Get a correction state"""
+        state = self.states.get(state_id)
+        if state and time.time() < state['expires_at']:
+            return state
+        if state:
+            del self.states[state_id]
+        return None
+    
+    def cleanup(self):
+        """Remove expired states"""
+        current_time = time.time()
+        expired = [k for k, v in self.states.items() if current_time > v['expires_at']]
+        for k in expired:
+            del self.states[k]
+    
+    def remove_correction(self, state_id):
+        """Remove a correction state"""
+        if state_id in self.states:
+            del self.states[state_id]
+
+correction_state = CorrectionState()
+
+def handle_correction_response(user_input, user_name):
+    """Handle user's response to price correction prompts."""
+    # Clean input
+    numbers = []
+    for part in user_input.split(','):
+        part = part.strip()
+        if part.isdigit():
+            numbers.append(int(part))
+    
+    if not numbers:
+        return None
+    
+    # Find active corrections for this user
+    active_corrections = []
+    for trans_id, state in correction_state.states.items():
+        if state['user_id'] == user_name and time.time() < state['expires_at']:
+            active_corrections.append((trans_id, state))
+    
+    if not active_corrections:
+        return None
+    
+    # Get the most recent correction
+    trans_id, state = active_corrections[-1]
+    state_ids = state['state_ids']
+    
+    responses = []
+    for state_id in state_ids:
+        correction = correction_state.get_correction(state_id)
+        if not correction:
+            continue
+        
+        item = correction['item']
+        amount = correction['amount']
+        min_price = correction['min_price']
+        max_price = correction['max_price']
+        
+        for choice in numbers:
+            if choice == 1:  # Special/bulk
+                responses.append(f"✅ Noted: {item} at {format_cedi(amount)} is a special/bulk purchase")
+                
+            elif choice == 2:  # Different quality/brand
+                responses.append(f"✅ Noted: {item} at {format_cedi(amount)} is different quality/brand")
+                
+            elif choice == 3:  # Wrong amount
+                responses.append("❌ Please delete and re-record with correct amount using:\n" +
+                               f"`/delete ID:{trans_id}`\n" +
+                               f"Then record again with correct amount.")
+                
+            elif choice == 4:  # Update price range
+                # Calculate new range to include this amount
+                new_min = min(min_price, amount)
+                new_max = max(max_price, amount)
+                
+                # Determine if item or category
+                if item.startswith('#'):
+                    # It's a category
+                    result = train_price(item, new_min, new_max, "", user_name)
+                else:
+                    # It's an item
+                    result = train_price(item, new_min, new_max, "", user_name)
+                
+                responses.append(f"📊 Updated price range for {item}: {format_cedi(new_min)}-{format_cedi(new_max)}")
+                
+            elif choice == 5:  # Ignore
+                responses.append(f"✅ Noted: {item} at {format_cedi(amount)} is correct (ignoring warning)")
+    
+    # Clean up
+    del correction_state.states[trans_id]
+    for state_id in state_ids:
+        correction_state.remove_correction(state_id)
+    
+    if responses:
+        return "\n".join(responses)
+    
+    return None
+
+# ==================== UNIT PRICE INTELLIGENCE ====================
+def detect_quantity_and_unit(description):
+    """Detect quantity and unit from description."""
+    # Patterns to detect: "10 chairs", "5kg sugar", "3 reams of paper"
+    patterns = [
+        r'(\d+)\s*(?:x\s*)?([a-zA-Z]+)\b',  # "10 chairs" or "10 x chairs"
+        r'(\d+)\s*([a-zA-Z]{1,3})\s+of\s+',  # "3 reams of paper"
+        r'for\s+(\d+)\s+([a-zA-Z]+)',  # "for 10 people"
+        r'(\d+(?:\.\d+)?)\s*([a-zA-Z]{2,})\b',  # "2.5kg sugar"
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, description, re.IGNORECASE)
+        if match:
+            quantity = float(match.group(1))
+            unit = match.group(2).lower()
+            return quantity, unit
+    
+    return 1, ""  # Default to single unit
+
+def calculate_unit_price(amount, description):
+    """Calculate and display unit price."""
+    quantity, unit = detect_quantity_and_unit(description)
+    
+    if quantity > 1:
+        unit_price = float(amount) / quantity
+        return f"🧮 That's {format_cedi(unit_price)} per {unit}" if unit else f"🧮 That's {format_cedi(unit_price)} per unit"
+    
+    return ""
+
+def auto_suggest_price(item_name, user_name):
+    """Auto-suggest price for trained items."""
+    price_info = check_price(item_name, 0)
+    
+    if not price_info:
+        return None
+    
+    range_info = price_info['range']
+    
+    # Get the middle of the range as suggestion
+    suggested_price = (range_info['min'] + range_info['max']) / 2
+    
+    return {
+        'item': item_name,
+        'suggested': suggested_price,
+        'min': range_info['min'],
+        'max': range_info['max'],
+        'confidence': range_info['confidence']
+    }
 
 # ==================== PRICE TRAINING SYSTEM ====================
 def ensure_price_ranges_sheet():
@@ -298,6 +474,325 @@ def auto_detect_items_in_description(description):
     except Exception:
         return []
 
+# ==================== PRICE HISTORY & TRENDS ====================
+def ensure_price_history_sheet():
+    """Ensure PriceHistory sheet exists."""
+    if not spreadsheet:
+        return False
+    
+    price_history_columns = ['Item', 'Date', 'Price', 'Type', 'Quantity', 'Unit', 
+                           'User', 'Transaction_ID', 'Notes']
+    
+    try:
+        worksheet = spreadsheet.worksheet('PriceHistory')
+        current_headers = worksheet.row_values(1)
+        
+        if len(current_headers) < len(price_history_columns):
+            for i, col in enumerate(price_history_columns):
+                if i >= len(current_headers):
+                    worksheet.update_cell(1, i+1, col)
+        return True
+        
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title='PriceHistory',
+            rows=10000,
+            cols=len(price_history_columns)
+        )
+        worksheet.append_row(price_history_columns)
+        return True
+    except Exception:
+        return False
+
+def record_price_history(item_name, price, trans_type, user_name, transaction_id="", quantity=1, unit=""):
+    """Record price in history for trend analysis."""
+    if not ensure_price_history_sheet():
+        return False
+    
+    try:
+        worksheet = spreadsheet.worksheet('PriceHistory')
+        
+        # Record the price
+        row = [
+            item_name,
+            datetime.now().strftime('%Y-%m-%d'),
+            float(price),
+            trans_type,
+            float(quantity),
+            unit,
+            user_name,
+            transaction_id,
+            f"Recorded via transaction {transaction_id}"
+        ]
+        
+        worksheet.append_row(row)
+        return True
+    except Exception:
+        return False
+
+def get_price_history(item_name, days=30):
+    """Get price history for an item."""
+    if not ensure_price_history_sheet():
+        return []
+    
+    try:
+        worksheet = spreadsheet.worksheet('PriceHistory')
+        all_rows = worksheet.get_all_values()
+        
+        if len(all_rows) <= 1:
+            return []
+        
+        cutoff_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        history = []
+        
+        for row in all_rows[1:]:
+            if row and len(row) >= 3 and row[0].strip().lower() == item_name.lower():
+                if row[1] >= cutoff_date:
+                    try:
+                        history.append({
+                            'date': row[1],
+                            'price': float(row[2]),
+                            'type': row[3] if len(row) > 3 else '',
+                            'quantity': float(row[4]) if len(row) > 4 and row[4] else 1,
+                            'unit': row[5] if len(row) > 5 else ''
+                        })
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Sort by date
+        history.sort(key=lambda x: x['date'])
+        return history
+        
+    except Exception:
+        return []
+
+def analyze_price_trends(item_name):
+    """Analyze price trends for an item."""
+    history = get_price_history(item_name, days=90)
+    
+    if len(history) < 2:
+        return None
+    
+    # Calculate statistics
+    prices = [h['price'] for h in history]
+    quantities = [h['quantity'] for h in history]
+    
+    # Adjust for quantity (get unit prices)
+    unit_prices = []
+    for i, price in enumerate(prices):
+        if quantities[i] > 0:
+            unit_prices.append(price / quantities[i])
+    
+    if not unit_prices:
+        return None
+    
+    oldest = unit_prices[0]
+    newest = unit_prices[-1]
+    avg_price = sum(unit_prices) / len(unit_prices)
+    min_price = min(unit_prices)
+    max_price = max(unit_prices)
+    
+    # Calculate trend
+    if len(unit_prices) >= 3:
+        recent_trend = (unit_prices[-1] - unit_prices[-3]) / unit_prices[-3] * 100
+    else:
+        recent_trend = (newest - oldest) / oldest * 100 if oldest > 0 else 0
+    
+    return {
+        'item': item_name,
+        'data_points': len(history),
+        'oldest_price': oldest,
+        'newest_price': newest,
+        'average_price': avg_price,
+        'min_price': min_price,
+        'max_price': max_price,
+        'trend_percent': recent_trend,
+        'trend': 'up' if recent_trend > 5 else 'down' if recent_trend < -5 else 'stable'
+    }
+
+# ==================== BUDGET MANAGEMENT ====================
+def ensure_budgets_sheet():
+    """Ensure Budgets sheet exists."""
+    if not spreadsheet:
+        return False
+    
+    budget_columns = ['Category_Item', 'Type', 'Budget_Amount', 'Period', 
+                     'Current_Spent', 'Remaining', 'Start_Date', 'End_Date',
+                     'User', 'Alert_At', 'Status', 'Notes']
+    
+    try:
+        worksheet = spreadsheet.worksheet('Budgets')
+        current_headers = worksheet.row_values(1)
+        
+        if len(current_headers) < len(budget_columns):
+            for i, col in enumerate(budget_columns):
+                if i >= len(current_headers):
+                    worksheet.update_cell(1, i+1, col)
+        return True
+        
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(
+            title='Budgets',
+            rows=1000,
+            cols=len(budget_columns)
+        )
+        worksheet.append_row(budget_columns)
+        return True
+    except Exception:
+        return False
+
+def set_budget(category_item, budget_amount, period, user_name, alert_at=80):
+    """Set a budget for a category or item."""
+    if not ensure_budgets_sheet():
+        return "❌ Cannot access Budgets sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Budgets')
+        all_rows = worksheet.get_all_values()
+        
+        # Check if budget already exists
+        row_index = None
+        for i, row in enumerate(all_rows[1:], start=2):
+            if row and len(row) > 0 and row[0].strip().lower() == category_item.lower() and row[8].strip() == user_name:
+                row_index = i
+                break
+        
+        # Determine type (category or item)
+        budget_type = "category" if category_item.startswith("#") else "item"
+        
+        # Calculate dates based on period
+        start_date = datetime.now().strftime('%Y-%m-%d')
+        if period == 'daily':
+            end_date = (datetime.now() + timedelta(days=1)).strftime('%Y-%m-%d')
+        elif period == 'weekly':
+            end_date = (datetime.now() + timedelta(days=7)).strftime('%Y-%m-%d')
+        elif period == 'monthly':
+            end_date = (datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
+        else:
+            return "❌ Invalid period. Use: daily, weekly, monthly"
+        
+        budget_data = [
+            category_item.strip(),
+            budget_type,
+            float(budget_amount),
+            period,
+            0.0,  # Current_Spent
+            float(budget_amount),  # Remaining
+            start_date,
+            end_date,
+            user_name,
+            int(alert_at),  # Alert_At percentage
+            'active',
+            f"Set by {user_name} on {start_date}"
+        ]
+        
+        if row_index:
+            # Update existing budget
+            for col, value in enumerate(budget_data, start=1):
+                worksheet.update_cell(row_index, col, value)
+            action = "updated"
+        else:
+            # Add new budget
+            worksheet.append_row(budget_data)
+            action = "set"
+        
+        return f"✅ {action.capitalize()} budget for {category_item}: {format_cedi(budget_amount)} {period}"
+        
+    except Exception as e:
+        return f"❌ Failed to set budget: {str(e)}"
+
+def update_budget_spending(category_item, amount, user_name):
+    """Update budget spending when transaction is recorded."""
+    if not ensure_budgets_sheet():
+        return None
+    
+    try:
+        worksheet = spreadsheet.worksheet('Budgets')
+        all_rows = worksheet.get_all_values()
+        
+        # Find active budgets for this category/item and user
+        for i, row in enumerate(all_rows[1:], start=2):
+            if (row and len(row) > 8 and 
+                row[0].strip().lower() == category_item.lower() and 
+                row[8].strip() == user_name and
+                row[10].strip().lower() == 'active'):
+                
+                try:
+                    current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
+                    budget_amount = float(row[2]) if len(row) > 2 and row[2] else 0
+                    
+                    new_spent = current_spent + float(amount)
+                    remaining = budget_amount - new_spent
+                    
+                    # Update spent and remaining
+                    worksheet.update_cell(i, 5, new_spent)  # Current_Spent
+                    worksheet.update_cell(i, 6, remaining)  # Remaining
+                    
+                    # Check if alert threshold reached
+                    alert_at = int(row[9]) if len(row) > 9 and row[9] else 80
+                    percent_spent = (new_spent / budget_amount * 100) if budget_amount > 0 else 0
+                    
+                    if percent_spent >= alert_at:
+                        return {
+                            'category_item': category_item,
+                            'budget_amount': budget_amount,
+                            'spent': new_spent,
+                            'remaining': remaining,
+                            'percent_spent': percent_spent,
+                            'alert_threshold': alert_at
+                        }
+                    
+                except (ValueError, IndexError):
+                    continue
+        
+        return None
+        
+    except Exception:
+        return None
+
+def check_budget_alerts(user_name):
+    """Check for budget alerts for a user."""
+    if not ensure_budgets_sheet():
+        return []
+    
+    try:
+        worksheet = spreadsheet.worksheet('Budgets')
+        all_rows = worksheet.get_all_values()
+        
+        alerts = []
+        
+        for row in all_rows[1:]:
+            if (row and len(row) > 10 and 
+                row[8].strip() == user_name and
+                row[10].strip().lower() == 'active'):
+                
+                try:
+                    category_item = row[0]
+                    budget_amount = float(row[2])
+                    current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
+                    alert_at = int(row[9]) if len(row) > 9 and row[9] else 80
+                    
+                    if budget_amount > 0:
+                        percent_spent = (current_spent / budget_amount) * 100
+                        
+                        if percent_spent >= alert_at:
+                            alerts.append({
+                                'category_item': category_item,
+                                'budget': budget_amount,
+                                'spent': current_spent,
+                                'remaining': budget_amount - current_spent,
+                                'percent_spent': percent_spent,
+                                'alert_at': alert_at
+                            })
+                            
+                except (ValueError, IndexError):
+                    continue
+        
+        return alerts
+        
+    except Exception:
+        return []
+
 # ==================== FIXED TRAIN COMMAND PARSER ====================
 def parse_train_command(text):
     """Parse +train command with proper handling of quotes and units."""
@@ -395,6 +890,12 @@ def initialize_spreadsheet_connection():
         # Initialize price ranges sheet
         ensure_price_ranges_sheet()
         
+        # Initialize price history sheet
+        ensure_price_history_sheet()
+        
+        # Initialize budgets sheet
+        ensure_budgets_sheet()
+        
     except Exception as e:
         print(f"Connection failed: {e}")
         spreadsheet = None
@@ -452,9 +953,9 @@ def ensure_sheet_structure(sheet_name, expected_columns, create_if_missing=False
 # Initialize connection
 initialize_spreadsheet_connection()
 
-# ==================== TRANSACTION FUNCTIONS ====================
+# ==================== ENHANCED TRANSACTION FUNCTIONS (WITH ALL NEW FEATURES) ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
-    """Record a transaction with unique ID and price checking."""
+    """Record a transaction with interactive price checking and all new features."""
     if not spreadsheet:
         return "❌ Bot error: Not connected to database."
     
@@ -478,8 +979,8 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             clean_description = re.sub(r'#\w+', '', description).strip()
             clean_description = re.sub(r'\s+', ' ', clean_description)
         
-        # Check for price warnings
-        price_warnings = []
+        # Check for price warnings and create correction states
+        correction_states = []
         
         # 1. Check if the exact item is trained
         detected_items = auto_detect_items_in_description(clean_description)
@@ -487,17 +988,57 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
         for item in detected_items:
             price_check = check_price(item['item'], amount)
             if price_check and price_check['status'] != 'within':
-                if price_check['status'] == 'above':
-                    price_warnings.append(f"⚠️ **{item['item']}** is usually ₵{item['min']:,.2f}-₵{item['max']:,.2f} (your price: ₵{float(amount):,.2f})")
-                elif price_check['status'] == 'below':
-                    price_warnings.append(f"⚠️ **{item['item']}** is usually ₵{item['min']:,.2f}-₵{item['max']:,.2f} (your price: ₵{float(amount):,.2f} seems low)")
+                state_id = correction_state.add_correction(
+                    user_name,  # Using username as user_id for simplicity
+                    transaction_id,
+                    item['item'],
+                    float(amount),
+                    item['min'],
+                    item['max'],
+                    sheet_name,
+                    {
+                        'type': trans_type,
+                        'description': clean_description,
+                        'category': category,
+                        'user': user_name
+                    }
+                )
+                correction_states.append({
+                    'state_id': state_id,
+                    'item': item['item'],
+                    'amount': float(amount),
+                    'status': price_check['status'],
+                    'range': item,
+                    'difference': price_check.get('difference', 0)
+                })
         
         # 2. Check category if present
         if category:
             price_check = check_price(f"#{category}", amount)
             if price_check and price_check['status'] != 'within':
-                if price_check['status'] == 'above':
-                    price_warnings.append(f"⚠️ **#{category}** expenses are usually ₵{price_check['range']['min']:,.2f}-₵{price_check['range']['max']:,.2f}")
+                state_id = correction_state.add_correction(
+                    user_name,
+                    transaction_id,
+                    f"#{category}",
+                    float(amount),
+                    price_check['range']['min'],
+                    price_check['range']['max'],
+                    sheet_name,
+                    {
+                        'type': trans_type,
+                        'description': clean_description,
+                        'category': category,
+                        'user': user_name
+                    }
+                )
+                correction_states.append({
+                    'state_id': state_id,
+                    'item': f"#{category}",
+                    'amount': float(amount),
+                    'status': price_check['status'],
+                    'range': price_check['range'],
+                    'difference': price_check.get('difference', 0)
+                })
         
         # Prepare row with ID
         row = [
@@ -518,10 +1059,73 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             response += f" in category: #{category}"
         response += f"\n📝 **ID:** `{transaction_id}`"
         
-        # Add price warnings if any
-        if price_warnings:
-            response += "\n\n" + "\n".join(price_warnings)
-            response += "\n\n💡 If this is correct, the bot will learn from it!"
+        # Add unit price calculation if quantity detected
+        unit_price_info = calculate_unit_price(amount, clean_description)
+        if unit_price_info:
+            response += f"\n{unit_price_info}"
+        
+        # Add interactive price warnings if any
+        if correction_states:
+            response += "\n\n🤔 **PRICE CHECK ALERT:**\n"
+            
+            for i, correction in enumerate(correction_states, 1):
+                item_name = correction['item']
+                if correction['status'] == 'above':
+                    response += f"\n{i}. **{item_name}** is usually {format_cedi(correction['range']['min'])}-{format_cedi(correction['range']['max'])}\n"
+                    response += f"   Your price: {format_cedi(correction['amount'])} (higher by {format_cedi(correction['difference'])})"
+                else:  # below
+                    response += f"\n{i}. **{item_name}** is usually {format_cedi(correction['range']['min'])}-{format_cedi(correction['range']['max'])}\n"
+                    response += f"   Your price: {format_cedi(correction['amount'])} (lower by {format_cedi(correction['difference'])})"
+            
+            response += "\n\n**Is this because:**"
+            response += "\n1. Special/bulk purchase?"
+            response += "\n2. Different quality/brand?"
+            response += "\n3. Wrong amount?"
+            response += "\n4. Update price range?"
+            response += "\n5. Ignore (it's correct)"
+            response += "\n\n**Reply with numbers** (e.g., '1' or '1,4')"
+            
+            # Store all state IDs for this transaction
+            state_ids = [c['state_id'] for c in correction_states]
+            correction_state.states[transaction_id] = {
+                'state_ids': state_ids,
+                'user_id': user_name,
+                'timestamp': time.time(),
+                'expires_at': time.time() + 300
+            }
+        
+        # Record price history for detected items and category
+        for item in detected_items:
+            quantity, unit = detect_quantity_and_unit(clean_description)
+            record_price_history(
+                item['item'],
+                amount,
+                trans_type,
+                user_name,
+                transaction_id,
+                quantity,
+                unit
+            )
+        
+        if category:
+            record_price_history(
+                f"#{category}",
+                amount,
+                trans_type,
+                user_name,
+                transaction_id,
+                1,  # Categories don't have quantity
+                ""
+            )
+        
+        # Check budget alerts for category
+        if category:
+            budget_alert = update_budget_spending(f"#{category}", amount, user_name)
+            if budget_alert:
+                response += f"\n\n⚠️ **BUDGET ALERT:** #{category}\n"
+                response += f"Spent: {format_cedi(budget_alert['spent'])} of {format_cedi(budget_alert['budget_amount'])}\n"
+                response += f"Remaining: {format_cedi(budget_alert['remaining'])}\n"
+                response += f"Progress: {budget_alert['percent_spent']:.1f}% (alert at {budget_alert['alert_threshold']}%)"
         
         return response
         
@@ -995,33 +1599,49 @@ You'll see:
 ✅ Recorded expense of ₵150.00 in category: #meeting
 📝 **ID:** EXP-ABC123
 
-**STEP 2: RECORD A SALE**
-`+sale 500 Website design #freelance`
+**NEW: INTERACTIVE PRICE CHECKS**
+If price seems unusual:
+🤔 **PRICE CHECK ALERT:** 
+Item is usually ₵60-₵80
+Your price: ₵200 (higher by ₵120)
 
-**STEP 3: CHECK YOUR BALANCE**
-`balance`
-→ Shows your current profit/loss
+**Is this because:**
+1. Special/bulk purchase?
+2. Different quality/brand?
+3. Wrong amount?
+4. Update price range?
+5. Ignore (it's correct)
 
-**STEP 4: SEE TODAY'S SUMMARY**
-`today`
-→ Shows income vs expenses for today
+**Reply with numbers** (e.g., '1' or '1,4')
 
-**STEP 5: TRAIN PRICE RANGES (Optional but useful)**
-`+train "printer paper" 60 80 per ream`
-Now if you record: `+expense 200 printer paper`
-→ Bot warns: "⚠️ printer paper is usually ₵60-₵80"
+**STEP 2: UNIT PRICE INTELLIGENCE**
+Try: `+expense 500 for 10 chairs`
+Bot shows: 🧮 That's ₵50.00 per chair
 
-**STEP 6: LIST YOUR TRANSACTIONS**
-`list`
-→ Shows recent transactions with IDs
+**STEP 3: PRICE HISTORY & TRENDS**
+`price_history "coffee"` - Shows price trends
+`compare "printer paper"` - Shows best/worst deals
 
-**STEP 7: DELETE IF NEEDED**
-`/delete ID:EXP-ABC123`
-→ Deletes that specific transaction
+**STEP 4: BUDGET GUARDIANS**
+`+budget #marketing 1000 monthly 80`
+- Sets ₵1000 monthly budget for marketing
+- Alerts at 80% spending
 
-**STEP 8: EXPLORE MORE**
-• `week` - Weekly report
-• `month` - Monthly report  
+`budgets` - Shows all budgets
+`budget_summary` - Overall budget status
+
+**STEP 5: AUTO-SUGGESTIONS**
+Just type trained item name: `birthday basic`
+Bot suggests: "Expected range: ₵40-₵45, Suggested: ₵42.50"
+
+**STEP 6: SMART DELETION**
+`list` - Shows recent transactions with IDs
+`/delete ID:EXP-ABC123` - Deletes by ID
+`/delete last` - Deletes most recent
+
+**STEP 7: EXPLORE MORE**
+• `balance` - Current profit/loss
+• `today`, `week`, `month` - Reports
 • `categories` - Spending breakdown
 • `show_prices` - See all trained items
 
@@ -1029,6 +1649,7 @@ Now if you record: `+expense 200 printer paper`
 • Use #hashtags to categorize (e.g., #office, #marketing)
 • Every transaction gets a unique ID for easy deletion
 • Price training helps catch unusual expenses
+• Budgets prevent overspending
 
 Type `help` for complete command reference, or just start recording!"""
 
@@ -1044,6 +1665,17 @@ def get_quick_start_guide():
    Example: `+sale 1000 Client payment #web_design`
 
 3. Check: `balance` or `today`
+
+**NEW SMART FEATURES:**
+1. **Price Training**: `+train "item" min max`
+   Example: `+train "printer paper" 60 80 per ream`
+
+2. **Unit Price**: Bot automatically calculates "₵50 per chair"
+
+3. **Budgets**: `+budget #[category] [amount] [period]`
+   Example: `+budget #marketing 1000 monthly`
+
+4. **Price History**: `price_history "coffee"`
 
 **NEED TO DELETE?**
 1. See recent: `list` or `/delete`
@@ -1077,6 +1709,33 @@ def get_help_message():
 • `price_check "item"` - Check price range
 • `show_prices` - List all trained items
 
+**🎯 INTERACTIVE PRICE CORRECTIONS:**
+When price is unusual, bot asks:
+1. Special/bulk purchase?
+2. Different quality/brand?
+3. Wrong amount?
+4. Update price range?
+5. Ignore (it's correct)
+
+**Reply with numbers** (e.g., '1' or '1,4')
+
+**🧮 UNIT PRICE INTELLIGENCE:**
+• Automatically calculates "₵50 per chair"
+• `unitprice [total] [description]`
+  Example: `unitprice 500 10 chairs`
+
+**📊 PRICE HISTORY & TRENDS:**
+• `price_history [item]` - Price trends over time
+• `compare [item]` - Best/worst deals
+• `best_price [item]` - Historical price comparison
+
+**💰 BUDGET MANAGEMENT:**
+• `+budget [category/item] [amount] [daily/weekly/monthly] [alert_at]`
+  Example: `+budget #marketing 1000 monthly 80`
+• `budgets` - Show all budgets
+• `+delete_budget [category/item]` - Delete budget
+• `budget_summary` - Overall budget status
+
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss (shows negative if in debt)
 • `today` - Today's income vs expenses
@@ -1100,33 +1759,14 @@ def get_help_message():
 1. Add #hashtags to automatically categorize
 2. Every transaction gets a unique ID for safe deletion
 3. Train common items to get price warnings
-4. Use `list` before deleting to see transaction IDs
+4. Use budgets to prevent overspending
+5. Check price_history before big purchases
 
 Need specific help? Try a command and the bot will guide you!"""
 
 def get_examples_message():
     """Show practical examples of usage."""
     return """💡 **PRACTICAL EXAMPLES**
-
-**BUSINESS SCENARIOS:**
-1. Record client payment:
-   `+sale 2000 Website redesign #client_project`
-
-2. Record business expense:
-   `+expense 300 Office rent #overhead`
-
-3. Record software purchase:
-   `+expense 150 Adobe Creative Cloud #software`
-
-**PERSONAL FINANCE:**
-1. Record grocery shopping:
-   `+expense 250 Groceries #food`
-
-2. Record salary:
-   `+income 5000 Monthly salary #salary`
-
-3. Record utility bill:
-   `+expense 150 Electricity bill #utilities`
 
 **PRICE TRAINING EXAMPLES:**
 1. Train coffee prices:
@@ -1138,21 +1778,41 @@ def get_examples_message():
 3. Train lunch prices:
    `+train "business lunch" 50 150 per person`
 
-**CATEGORIZATION EXAMPLES:**
-• Marketing: `#ads`, `#social_media`, `#seo`
-• Office: `#supplies`, `#rent`, `#utilities`
-• Services: `#web_hosting`, `#software`, `#consulting`
-• Personal: `#food`, `#transport`, `#entertainment`
+4. Train categories:
+   `+train "#marketing" 200 1000 monthly`
+
+**INTERACTIVE CORRECTIONS:**
+
+**BUDGET EXAMPLES:**
+1. Daily coffee budget:
+   `+budget coffee 50 daily 80`
+
+2. Monthly marketing budget:
+   `+budget #marketing 1000 monthly 90`
+
+3. Weekly groceries:
+   `+budget #groceries 300 weekly`
+
+**UNIT PRICE EXAMPLES:**
+1. `+expense 500 for 10 chairs`
+   → 🧮 That's ₵50.00 per chair
+
+2. `+sale 1200 for 4 website designs`
+   → 🧮 That's ₵300.00 per website design
+
+3. `unitprice 750 15kg rice`
+   → 🧮 That's ₵50.00 per kg
 
 **TRY THESE:**
 1. `+expense 80 Lunch with team #team_building`
 2. `+sale 1500 Mobile app development #freelance`
-3. Check: `balance`
-4. See: `categories`"""
+3. `+train "birthday basic" 40 45 per package`
+4. `+budget #freelance 5000 monthly 80`
+5. `price_history "coffee"`"""
 
-# ==================== COMMAND PROCESSOR ====================
+# ==================== MAIN COMMAND PROCESSOR (UPDATED WITH ALL NEW FEATURES) ====================
 def process_command(user_input, user_name="User"):
-    """Main command processor."""
+    """Main command processor with all Phase 1 features."""
     if not user_input:
         return "🤔 I'm ready to help! Need to record a transaction or check your finances?"
     
@@ -1168,6 +1828,32 @@ def process_command(user_input, user_name="User"):
 
     # Clean punctuation
     text_lower = re.sub(r'^[:\s]+|[:\s]+$', '', text_lower)
+
+    # ==================== INTERACTIVE CORRECTIONS ====================
+    # Check if this is a response to price correction
+    if text_lower.replace(',', '').replace(' ', '').isdigit():
+        correction_response = handle_correction_response(text_lower, user_name)
+        if correction_response:
+            return correction_response
+
+    # ==================== AUTO-SUGGEST & QUICK RECORD ====================
+    
+    # Quick record for trained items: "birthday basic"
+    if not any(text_lower.startswith(prefix) for prefix in ['+', '/', 'balance', 'today', 'week', 'month', 'help', 'tutorial']):
+        # Check if this is a known item
+        suggestion = auto_suggest_price(text_lower, user_name)
+        if suggestion:
+            return f"""💰 **{suggestion['item'].title()}** detected!
+            
+Expected range: {format_cedi(suggestion['min'])} - {format_cedi(suggestion['max'])}
+Suggested price: {format_cedi(suggestion['suggested'])}
+
+**Quick record options:**
+1. Sale: `+sale {suggestion['suggested']:.2f} {suggestion['item']}`
+2. Expense: `+expense {suggestion['suggested']:.2f} {suggestion['item']}`
+3. Custom amount: `+sale [amount] {suggestion['item']}`
+
+Confidence: {suggestion['confidence']}%"""
 
     # ==================== LEARNING & HELP COMMANDS ====================
     
@@ -1186,6 +1872,265 @@ def process_command(user_input, user_name="User"):
     # Help
     elif text_lower in ['help', '/start', '/help', 'commands', 'menu', 'what can you do']:
         return get_help_message()
+
+    # ==================== UNIT PRICE CALCULATION ====================
+    
+    if text_lower.startswith('unitprice ') or text_lower.startswith('perunit '):
+        parts = text.split()
+        if len(parts) >= 3:
+            try:
+                amount = float(parts[1])
+                description = ' '.join(parts[2:])
+                result = calculate_unit_price(amount, description)
+                if result:
+                    return result
+                else:
+                    return "❌ Couldn't detect quantity in description. Format: 'unitprice 500 10 chairs'"
+            except ValueError:
+                return "❌ Invalid amount format"
+        return "❌ Format: unitprice [total] [description with quantity]"
+    
+    # ==================== PRICE HISTORY & TRENDS ====================
+    
+    # Price history command
+    elif text_lower.startswith('price_history ') or text_lower.startswith('trends '):
+        parts = text.split()
+        if len(parts) >= 2:
+            item_name = ' '.join(parts[1:])
+            # Remove quotes if present
+            if item_name.startswith('"') and item_name.endswith('"'):
+                item_name = item_name[1:-1]
+            
+            trends = analyze_price_trends(item_name)
+            if not trends:
+                return f"❌ Not enough price history for '{item_name}'\n💡 Record more transactions with this item to see trends."
+            
+            emoji = "📈" if trends['trend'] == 'up' else "📉" if trends['trend'] == 'down' else "➖"
+            
+            response = f"{emoji} **PRICE TRENDS: {trends['item'].title()}**\n\n"
+            response += f"• **Data Points:** {trends['data_points']} transactions\n"
+            response += f"• **Average Price:** {format_cedi(trends['average_price'])}\n"
+            response += f"• **Range:** {format_cedi(trends['min_price'])} - {format_cedi(trends['max_price'])}\n"
+            response += f"• **Recent Trend:** {trends['trend_percent']:.1f}% ({trends['trend']})\n"
+            
+            if trends['trend_percent'] > 10:
+                response += f"⚠️ **Warning:** Prices increased significantly!\n"
+            elif trends['trend_percent'] < -10:
+                response += f"✅ **Good news:** Prices decreased!\n"
+            
+            # Get recent history
+            history = get_price_history(item_name, days=30)
+            if history:
+                response += f"\n📅 **Last {len(history)} purchases:**\n"
+                for h in history[-5:]:  # Show last 5
+                    unit_price = h['price'] / h['quantity'] if h['quantity'] > 1 else h['price']
+                    response += f"• {h['date']}: {format_cedi(unit_price)}"
+                    if h['quantity'] > 1:
+                        response += f" each ({h['quantity']} {h['unit']} for {format_cedi(h['price'])})"
+                    response += "\n"
+            
+            return response
+        return "❌ Format: price_history [item]\nExample: price_history \"printer paper\""
+    
+    # Compare prices command
+    elif text_lower.startswith('compare ') or text_lower.startswith('best_price '):
+        parts = text.split()
+        if len(parts) >= 2:
+            item_name = ' '.join(parts[1:])
+            history = get_price_history(item_name, days=365)
+            
+            if not history:
+                return f"❌ No price history for '{item_name}'"
+            
+            # Find best and worst deals
+            unit_prices = []
+            for h in history:
+                if h['quantity'] > 0:
+                    unit_prices.append({
+                        'date': h['date'],
+                        'unit_price': h['price'] / h['quantity'],
+                        'total': h['price'],
+                        'quantity': h['quantity']
+                    })
+            
+            if not unit_prices:
+                return f"❌ Couldn't calculate unit prices for '{item_name}'"
+            
+            best_deal = min(unit_prices, key=lambda x: x['unit_price'])
+            worst_deal = max(unit_prices, key=lambda x: x['unit_price'])
+            avg_price = sum(u['unit_price'] for u in unit_prices) / len(unit_prices)
+            
+            response = f"🏷️ **PRICE COMPARISON: {item_name.title()}**\n\n"
+            response += f"✅ **Best Deal:** {format_cedi(best_deal['unit_price'])} on {best_deal['date']}\n"
+            response += f"   ({best_deal['quantity']} for {format_cedi(best_deal['total'])})\n\n"
+            response += f"❌ **Worst Deal:** {format_cedi(worst_deal['unit_price'])} on {worst_deal['date']}\n"
+            response += f"   ({worst_deal['quantity']} for {format_cedi(worst_deal['total'])})\n\n"
+            response += f"📊 **Average:** {format_cedi(avg_price)}\n"
+            response += f"📈 **Price Range:** {format_cedi(best_deal['unit_price'])} - {format_cedi(worst_deal['unit_price'])}\n"
+            response += f"📋 **Total Purchases:** {len(history)}\n"
+            
+            # Advice
+            if best_deal['unit_price'] < avg_price * 0.8:
+                response += f"\n💡 **Tip:** Try to buy when price is around {format_cedi(best_deal['unit_price'])} like on {best_deal['date']}"
+            
+            return response
+        return "❌ Format: compare [item]\nExample: compare \"coffee\""
+    
+    # ==================== BUDGET MANAGEMENT ====================
+    
+    # Set budget
+    elif text_lower.startswith('+budget ') or text_lower.startswith('set_budget '):
+        parts = text.split()
+        if len(parts) >= 4:
+            category_item = parts[1]
+            try:
+                budget_amount = float(parts[2])
+                period = parts[3].lower()
+                alert_at = int(parts[4]) if len(parts) > 4 else 80
+                
+                if period not in ['daily', 'weekly', 'monthly']:
+                    return "❌ Period must be: daily, weekly, monthly"
+                
+                if not (0 < alert_at <= 100):
+                    return "❌ Alert percentage must be between 1-100"
+                
+                return set_budget(category_item, budget_amount, period, user_name, alert_at)
+                
+            except ValueError:
+                return "❌ Invalid amount format. Example: +budget #marketing 1000 monthly 80"
+        return "❌ Format: +budget [category/item] [amount] [daily/weekly/monthly] [alert_percentage]\nExample: +budget #marketing 1000 monthly 80"
+    
+    # Show budgets
+    elif text_lower in ['budgets', 'my_budgets', 'show_budgets']:
+        alerts = check_budget_alerts(user_name)
+        
+        try:
+            worksheet = spreadsheet.worksheet('Budgets')
+            all_rows = worksheet.get_all_values()
+            
+            if len(all_rows) <= 1:
+                return "📭 No budgets set. Use +budget to create one."
+            
+            response = "💰 **YOUR BUDGETS:**\n\n"
+            
+            for row in all_rows[1:]:
+                if row and len(row) > 8 and row[8].strip() == user_name:
+                    try:
+                        category_item = row[0]
+                        budget_amount = float(row[2]) if len(row) > 2 and row[2] else 0
+                        period = row[3] if len(row) > 3 else ""
+                        current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
+                        remaining = float(row[5]) if len(row) > 5 else budget_amount
+                        status = row[10] if len(row) > 10 else "active"
+                        
+                        if status.lower() != 'active':
+                            continue
+                        
+                        percent_spent = (current_spent / budget_amount * 100) if budget_amount > 0 else 0
+                        
+                        # Choose emoji based on percentage
+                        if percent_spent >= 100:
+                            emoji = "❌"
+                        elif percent_spent >= 90:
+                            emoji = "⚠️"
+                        elif percent_spent >= 50:
+                            emoji = "📊"
+                        else:
+                            emoji = "✅"
+                        
+                        response += f"{emoji} **{category_item}**: {format_cedi(current_spent)} / {format_cedi(budget_amount)} {period}\n"
+                        response += f"   Remaining: {format_cedi(remaining)} | {percent_spent:.1f}% spent\n\n"
+                        
+                    except (ValueError, IndexError):
+                        continue
+            
+            if alerts:
+                response += "🚨 **BUDGET ALERTS:**\n"
+                for alert in alerts:
+                    response += f"⚠️ **{alert['category_item']}**: {alert['percent_spent']:.1f}% spent!\n"
+                    response += f"   {format_cedi(alert['spent'])} of {format_cedi(alert['budget'])} (Remaining: {format_cedi(alert['remaining'])})\n\n"
+            
+            return response
+            
+        except Exception:
+            return "❌ Cannot access budgets."
+    
+    # Delete budget
+    elif text_lower.startswith('+delete_budget '):
+        parts = text.split()
+        if len(parts) >= 2:
+            category_item = parts[1]
+            
+            try:
+                worksheet = spreadsheet.worksheet('Budgets')
+                all_rows = worksheet.get_all_values()
+                
+                for i, row in enumerate(all_rows[1:], start=2):
+                    if row and len(row) > 0 and row[0].strip().lower() == category_item.lower() and row[8].strip() == user_name:
+                        worksheet.update_cell(i, 11, 'deleted')  # Update status
+                        return f"✅ Deleted budget for {category_item}"
+                
+                return f"❌ No budget found for {category_item}"
+                
+            except Exception:
+                return "❌ Cannot access budgets."
+        return "❌ Format: +delete_budget [category/item]"
+    
+    # Budget summary
+    elif text_lower == 'budget_summary':
+        try:
+            worksheet = spreadsheet.worksheet('Budgets')
+            all_rows = worksheet.get_all_values()
+            
+            active_budgets = []
+            total_budget = 0
+            total_spent = 0
+            
+            for row in all_rows[1:]:
+                if row and len(row) > 10 and row[8].strip() == user_name and row[10].strip().lower() == 'active':
+                    try:
+                        budget_amount = float(row[2]) if len(row) > 2 and row[2] else 0
+                        current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
+                        
+                        total_budget += budget_amount
+                        total_spent += current_spent
+                        
+                        percent_spent = (current_spent / budget_amount * 100) if budget_amount > 0 else 0
+                        
+                        active_budgets.append({
+                            'item': row[0],
+                            'budget': budget_amount,
+                            'spent': current_spent,
+                            'percent': percent_spent
+                        })
+                        
+                    except (ValueError, IndexError):
+                        continue
+            
+            if not active_budgets:
+                return "📭 No active budgets. Use +budget to create one."
+            
+            response = "📊 **BUDGET SUMMARY**\n\n"
+            response += f"Total Budget: {format_cedi(total_budget)}\n"
+            response += f"Total Spent: {format_cedi(total_spent)}\n"
+            response += f"Remaining: {format_cedi(total_budget - total_spent)}\n"
+            response += f"Overall Progress: {(total_spent/total_budget*100) if total_budget > 0 else 0:.1f}%\n\n"
+            
+            response += "**By Category/Item:**\n"
+            for budget in sorted(active_budgets, key=lambda x: x['percent'], reverse=True)[:10]:  # Top 10
+                emoji = "❌" if budget['percent'] >= 100 else "⚠️" if budget['percent'] >= 80 else "✅"
+                response += f"{emoji} {budget['item']}: {budget['percent']:.1f}% ({format_cedi(budget['spent'])}/{format_cedi(budget['budget'])})\n"
+            
+            # Advice
+            if total_spent > total_budget * 0.8:
+                response += "\n⚠️ **Warning:** You've used 80%+ of total budget!"
+            elif total_spent < total_budget * 0.3:
+                response += "\n✅ **Good:** You're under 30% of total budget!"
+            
+            return response
+            
+        except Exception:
+            return "❌ Cannot access budgets."
 
     # ==================== PRICE TRAINING COMMANDS ====================
     
@@ -1378,10 +2323,11 @@ You delete: `/delete ID:EXP-ABC123`"""
 • Learn how: `tutorial` (beginner guide) or `quickstart` (fast start)
 • See all commands: `help`
 
-**OR TRY THESE:**
+**NEW SMART FEATURES:**
 1. `+train "item" 100 200` - Train price ranges
-2. `list` - See your recent transactions
-3. `categories` - View spending breakdown
-4. `show_prices` - See trained items
+2. `+budget #category 1000 monthly` - Set budget
+3. `price_history "item"` - Check price trends
+4. `list` - See your recent transactions
+5. `show_prices` - See trained items
 
 What would you like to do?"""
