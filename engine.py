@@ -1,13 +1,16 @@
-# engine.py - COMPLETE FIXED VERSION WITH PHASE 1 FEATURES
+# engine.py - PHASE 2 IMPLEMENTATION - PART 1/3
 import os
 import json
 import gspread
 import re
 import secrets
 import time
-from google.oauth2.service_account import Credentials
+import random
+import math
+import statistics
+from collections import defaultdict, deque, Counter
 from datetime import datetime, timedelta
-from collections import defaultdict
+from google.oauth2.service_account import Credentials
 
 # ==================== CONFIGURATION ====================
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -50,6 +53,14 @@ def find_column_index(headers, column_name):
         return headers_lower.index(column_lower)
     except ValueError:
         return -1
+
+def format_percentage(value):
+    """Format percentage with proper sign."""
+    if value > 0:
+        return f"+{value:.1f}%"
+    elif value < 0:
+        return f"{value:.1f}%"
+    return "0.0%"
 
 # ==================== INTERACTIVE PRICE CORRECTION SYSTEM ====================
 class CorrectionState:
@@ -588,7 +599,7 @@ def analyze_price_trends(item_name):
     
     oldest = unit_prices[0]
     newest = unit_prices[-1]
-    avg_price = sum(unit_prices) / len(unit_prices)
+    avg_price = statistics.mean(unit_prices)
     min_price = min(unit_prices)
     max_price = max(unit_prices)
     
@@ -952,6 +963,568 @@ def ensure_sheet_structure(sheet_name, expected_columns, create_if_missing=False
 
 # Initialize connection
 initialize_spreadsheet_connection()
+
+# engine.py - PHASE 2 IMPLEMENTATION - PART 2/3
+# (Continuation from Part 1)
+
+# ==================== PHASE 2: CONVERSATIONAL INTELLIGENCE ====================
+
+class ConversationMemory:
+    """Memory system for conversation context"""
+    
+    def __init__(self, max_messages=10, max_time=3600):
+        self.user_memories = {}
+        self.max_messages = max_messages
+        self.max_time = max_time  # 1 hour
+    
+    def add_message(self, user_id, role, content):
+        """Add a message to user's conversation memory."""
+        if user_id not in self.user_memories:
+            self.user_memories[user_id] = {
+                'messages': deque(maxlen=self.max_messages),
+                'context': {},
+                'preferences': {},
+                'last_interaction': time.time()
+            }
+        
+        self.user_memories[user_id]['messages'].append({
+            'role': role,
+            'content': content,
+            'timestamp': time.time()
+        })
+        
+        self.user_memories[user_id]['last_interaction'] = time.time()
+    
+    def get_context(self, user_id):
+        """Get conversation context for a user."""
+        if user_id not in self.user_memories:
+            return None
+        
+        # Clean old messages
+        current_time = time.time()
+        user_data = self.user_memories[user_id]
+        
+        # Remove messages older than max_time
+        while (user_data['messages'] and 
+               current_time - user_data['messages'][0]['timestamp'] > self.max_time):
+            user_data['messages'].popleft()
+        
+        return {
+            'recent_messages': list(user_data['messages'])[-5:],  # Last 5 messages
+            'context': user_data.get('context', {}),
+            'preferences': user_data.get('preferences', {}),
+            'last_interaction': user_data['last_interaction']
+        }
+    
+    def update_preference(self, user_id, key, value):
+        """Update user preference."""
+        if user_id not in self.user_memories:
+            self.user_memories[user_id] = {
+                'messages': deque(maxlen=self.max_messages),
+                'context': {},
+                'preferences': {},
+                'last_interaction': time.time()
+            }
+        
+        self.user_memories[user_id]['preferences'][key] = {
+            'value': value,
+            'updated': time.time()
+        }
+    
+    def get_preference(self, user_id, key, default=None):
+        """Get user preference."""
+        if (user_id in self.user_memories and 
+            'preferences' in self.user_memories[user_id] and
+            key in self.user_memories[user_id]['preferences']):
+            return self.user_memories[user_id]['preferences'][key]['value']
+        return default
+    
+    def set_context(self, user_id, key, value):
+        """Set temporary context for a user."""
+        if user_id not in self.user_memories:
+            self.user_memories[user_id] = {
+                'messages': deque(maxlen=self.max_messages),
+                'context': {},
+                'preferences': {},
+                'last_interaction': time.time()
+            }
+        
+        self.user_memories[user_id]['context'][key] = {
+            'value': value,
+            'set_at': time.time()
+        }
+    
+    def get_context_value(self, user_id, key, default=None):
+        """Get context value."""
+        if (user_id in self.user_memories and 
+            'context' in self.user_memories[user_id] and
+            key in self.user_memories[user_id]['context']):
+            
+            # Check if context is still valid (5 minutes)
+            context_item = self.user_memories[user_id]['context'][key]
+            if time.time() - context_item['set_at'] < 300:  # 5 minutes
+                return context_item['value']
+        
+        return default
+    
+    def clear_context(self, user_id):
+        """Clear all context for a user."""
+        if user_id in self.user_memories:
+            self.user_memories[user_id]['context'] = {}
+    
+    def cleanup_old_users(self):
+        """Clean up old user data to save memory."""
+        current_time = time.time()
+        users_to_remove = []
+        
+        for user_id, data in self.user_memories.items():
+            if current_time - data['last_interaction'] > 86400:  # 24 hours
+                users_to_remove.append(user_id)
+        
+        for user_id in users_to_remove:
+            del self.user_memories[user_id]
+
+# Create global conversation memory
+conversation_memory = ConversationMemory()
+
+class NaturalLanguageProcessor:
+    """Process natural language into commands"""
+    
+    def __init__(self):
+        # Patterns for natural language understanding
+        self.patterns = {
+            'expense': [
+                (r'(?:spent|paid|bought|purchased)\s+(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:on|for)\s+(.+)', 'expense'),
+                (r'(?:cost|expense)\s+(?:me|us)?\s*(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:for|on)\s+(.+)', 'expense'),
+                (r'(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:for|on)\s+(.+)', 'expense'),
+                (r'(?:i\s+)?(?:spent|paid)\s+(?:₵)?(\d+(?:\.\d{1,2})?)', 'expense'),
+            ],
+            'sale': [
+                (r'(?:made|earned|received|got|sold)\s+(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:from|for)\s+(.+)', 'sale'),
+                (r'(?:income|revenue|payment)\s+(?:of)?\s*(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:for|from)\s+(.+)', 'sale'),
+                (r'(?:client|customer)\s+(?:paid|gave)\s+(?:me|us)?\s*(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:for|for)\s+(.+)', 'sale'),
+                (r'(?:i\s+)?(?:made|earned)\s+(?:₵)?(\d+(?:\.\d{1,2})?)', 'sale'),
+            ],
+            'income': [
+                (r'(?:received|got)\s+(?:₵)?(\d+(?:\.\d{1,2})?)\s+(?:as|for)\s+(?:salary|investment|dividend|refund)', 'income'),
+                (r'(?:salary|investment|dividend|refund)\s+(?:of)?\s*(?:₵)?(\d+(?:\.\d{1,2})?)', 'income'),
+            ]
+        }
+        
+        # Common item/category patterns
+        self.item_patterns = {
+            'food': ['lunch', 'dinner', 'breakfast', 'coffee', 'tea', 'food', 'meal', 'snack', 'restaurant'],
+            'transport': ['taxi', 'uber', 'bus', 'fuel', 'transport', 'travel', 'transportation'],
+            'office': ['paper', 'printer', 'supplies', 'stationery', 'rent', 'electricity', 'internet', 'utilities'],
+            'marketing': ['ads', 'facebook', 'google', 'marketing', 'promotion', 'advertising'],
+            'entertainment': ['movie', 'netflix', 'entertainment', 'game', 'music', 'subscription'],
+            'client': ['client', 'customer', 'meeting', 'business lunch', 'business dinner']
+        }
+        
+        # Follow-up question patterns
+        self.question_patterns = {
+            'amount': [r'how much', r'what.*amount', r'what.*price', r'how many'],
+            'description': [r'what.*for', r'what.*about', r'describe', r'details'],
+            'category': [r'what.*category', r'which.*category', r'hashtag', r'#'],
+            'type': [r'income or expense', r'sale or expense', r'what type']
+        }
+    
+    def extract_transaction(self, text):
+        """Extract transaction details from natural language."""
+        text_lower = text.lower()
+        
+        # Check each transaction type pattern
+        for trans_type, patterns in self.patterns.items():
+            for pattern, type_name in patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    try:
+                        amount = float(match.group(1))
+                        if len(match.groups()) >= 2:
+                            description = match.group(2).strip()
+                        else:
+                            description = ""
+                        
+                        # Extract category from description
+                        category = ""
+                        if description:
+                            # Look for hashtags
+                            hashtags = re.findall(r'#(\w+)', description)
+                            if hashtags:
+                                category = hashtags[0]
+                                description = re.sub(r'#\w+', '', description).strip()
+                        
+                        # Auto-detect category from keywords if no hashtag
+                        if not category:
+                            for cat, keywords in self.item_patterns.items():
+                                for keyword in keywords:
+                                    if keyword in description.lower():
+                                        category = cat
+                                        break
+                                if category:
+                                    break
+                        
+                        return {
+                            'type': type_name,
+                            'amount': amount,
+                            'description': description,
+                            'category': category,
+                            'confidence': 0.85,
+                            'source': 'natural_language'
+                        }
+                    except (ValueError, IndexError):
+                        continue
+        
+        return None
+    
+    def detect_intent(self, text):
+        """Detect user intent from text."""
+        text_lower = text.lower().strip()
+        
+        # Greetings
+        if any(word in text_lower for word in ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening']):
+            return {'intent': 'greeting', 'confidence': 0.95}
+        
+        # Thanks
+        if any(word in text_lower for word in ['thanks', 'thank you', 'thank', 'appreciate', 'ty']):
+            return {'intent': 'thanks', 'confidence': 0.95}
+        
+        # Help requests
+        if any(word in text_lower for word in ['help', 'what can you do', 'how to', 'how do i', 'guide', 'tutorial']):
+            return {'intent': 'help', 'confidence': 0.9}
+        
+        # Check if it's a transaction in natural language
+        transaction = self.extract_transaction(text)
+        if transaction:
+            return {
+                'intent': 'record_transaction',
+                'transaction': transaction,
+                'confidence': transaction['confidence']
+            }
+        
+        # Questions
+        if '?' in text:
+            if any(pattern in text_lower for pattern in ['how much', 'what.*balance', 'what.*profit']):
+                return {'intent': 'ask_balance', 'confidence': 0.8}
+            elif any(pattern in text_lower for pattern in ["today's", 'today.*sales', 'today.*expenses']):
+                return {'intent': 'ask_today', 'confidence': 0.8}
+            elif any(pattern in text_lower for pattern in ['week.*report', 'this week']):
+                return {'intent': 'ask_week', 'confidence': 0.8}
+            elif any(pattern in text_lower for pattern in ['month.*report', 'this month']):
+                return {'intent': 'ask_month', 'confidence': 0.8}
+            else:
+                return {'intent': 'general_question', 'confidence': 0.7}
+        
+        # Commands in natural language
+        if any(word in text_lower for word in ['show my', 'list my', 'view my', 'check my']):
+            if 'transaction' in text_lower or 'records' in text_lower:
+                return {'intent': 'list_transactions', 'confidence': 0.85}
+            elif 'budget' in text_lower:
+                return {'intent': 'show_budgets', 'confidence': 0.85}
+        
+        # Proactive check-in
+        if any(word in text_lower for word in ['how am i doing', 'how.*business', 'financial health', 'am i doing well']):
+            return {'intent': 'financial_checkup', 'confidence': 0.9}
+        
+        # Default
+        return {'intent': 'unknown', 'confidence': 0.3}
+    
+    def generate_follow_up(self, intent, context=None):
+        """Generate follow-up questions based on intent."""
+        follow_ups = {
+            'record_transaction': {
+                'missing_amount': "💰 How much was it?",
+                'missing_description': "📝 What was it for?",
+                'missing_category': "🏷️ Any category (like #food or #office)?",
+                'confirm': "✅ Ready to record this?",
+            },
+            'ask_balance': {
+                'default': "💰 Checking your balance now...",
+            },
+            'ask_today': {
+                'default': "📊 Let me show you today's summary...",
+            },
+            'financial_checkup': {
+                'default': "🩺 Let me check your financial health...",
+            }
+        }
+        
+        if intent in follow_ups:
+            if context and 'missing' in context:
+                return follow_ups[intent].get(context['missing'], follow_ups[intent].get('default', ""))
+            return follow_ups[intent].get('default', "")
+        
+        return ""
+
+class ProactiveAssistant:
+    """Proactive financial assistant features"""
+    
+    def __init__(self):
+        self.check_ins = [
+            "Haven't seen you in a while! Want to record any transactions?",
+            "Time for a quick financial check-in! How's everything going?",
+            "Just checking in - any sales or expenses to record today?",
+            "Ready to update your finances? I'm here to help!",
+        ]
+        
+        self.insights = [
+            "💡 Tip: Recording daily helps you spot trends faster!",
+            "📈 Remember: Small expenses add up - track them all!",
+            "💰 Pro tip: Review your budgets weekly to stay on track!",
+            "🎯 Keep going! Consistent tracking leads to better decisions!",
+        ]
+        
+        self.pattern_warnings = [
+            "⚠️ I notice {pattern}. Want to discuss it?",
+            "📊 Interesting pattern: {pattern}. Need any insights?",
+            "🔍 I detected {pattern}. Would you like me to analyze it?",
+        ]
+    
+    def should_check_in(self, user_id):
+        """Check if we should send a proactive check-in."""
+        context = conversation_memory.get_context(user_id)
+        if not context:
+            return True
+        
+        last_interaction = context['last_interaction']
+        current_time = time.time()
+        
+        # Check in if no interaction in 24 hours
+        return current_time - last_interaction > 86400
+    
+    def get_check_in_message(self):
+        """Get a random check-in message."""
+        return random.choice(self.check_ins)
+    
+    def get_insight(self):
+        """Get a random financial insight."""
+        return random.choice(self.insights)
+    
+    def detect_patterns(self, user_name):
+        """Detect financial patterns for proactive advice."""
+        patterns = []
+        
+        # Get recent transactions
+        recent_transactions = []
+        for sheet in ['Sales', 'Expenses', 'Income']:
+            transactions = get_transactions(sheet, user_filter=user_name)
+            # Get last 30 days
+            thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+            recent = [t for t in transactions if t['date'] >= thirty_days_ago]
+            recent_transactions.extend(recent)
+        
+        if len(recent_transactions) < 5:
+            return patterns
+        
+        # Check for no recent transactions
+        today = datetime.now().strftime('%Y-%m-%d')
+        recent_days = set(t['date'] for t in recent_transactions)
+        if len(recent_days) < 3:
+            patterns.append("you haven't recorded many transactions recently")
+        
+        # Check expense patterns
+        expenses = [t for t in recent_transactions if t['type'] == 'expense']
+        if expenses:
+            total_expenses = sum(t['amount'] for t in expenses)
+            avg_daily_expense = total_expenses / 30
+            
+            if avg_daily_expense > 500:
+                patterns.append(f"your daily expenses average ₵{avg_daily_expense:,.2f}")
+            
+            # Check for large single expenses
+            large_expenses = [t for t in expenses if t['amount'] > 1000]
+            if large_expenses:
+                patterns.append(f"{len(large_expenses)} large expense(s) over ₵1,000")
+        
+        # Check sales patterns
+        sales = [t for t in recent_transactions if t['type'] in ['sale', 'income']]
+        if sales:
+            total_sales = sum(t['amount'] for t in sales)
+            if total_sales > 0:
+                # Check consistency
+                if len(sales) >= 3:
+                    amounts = [t['amount'] for t in sales]
+                    variation = (max(amounts) - min(amounts)) / max(amounts)
+                    if variation > 0.8:
+                        patterns.append("your sales amounts vary significantly")
+        
+        return patterns
+    
+    def get_pattern_warning(self, pattern):
+        """Get a pattern warning message."""
+        template = random.choice(self.pattern_warnings)
+        return template.format(pattern=pattern)
+
+class GuidedFlow:
+    """Step-by-step guided transaction flows"""
+    
+    def __init__(self):
+        self.active_flows = {}  # user_id -> flow_state
+        self.flows = {
+            'record_expense': {
+                'steps': [
+                    {'question': "💰 What's the amount?", 'field': 'amount', 'type': 'number'},
+                    {'question': "📝 What was it for?", 'field': 'description', 'type': 'text'},
+                    {'question': "🏷️ Any category? (e.g., #food, #office)", 'field': 'category', 'type': 'optional'},
+                    {'question': "✅ Ready to record this expense?", 'field': 'confirm', 'type': 'confirmation'},
+                ],
+                'action': 'record_expense'
+            },
+            'record_sale': {
+                'steps': [
+                    {'question': "💰 How much did you earn?", 'field': 'amount', 'type': 'number'},
+                    {'question': "📝 What was it for?", 'field': 'description', 'type': 'text'},
+                    {'question': "🏷️ Any category? (e.g., #web_design, #consulting)", 'field': 'category', 'type': 'optional'},
+                    {'question': "✅ Ready to record this sale?", 'field': 'confirm', 'type': 'confirmation'},
+                ],
+                'action': 'record_sale'
+            },
+            'set_budget': {
+                'steps': [
+                    {'question': "📊 What category or item? (e.g., #marketing or 'coffee')", 'field': 'category_item', 'type': 'text'},
+                    {'question': "💰 What's the budget amount?", 'field': 'amount', 'type': 'number'},
+                    {'question': "⏰ What period? (daily, weekly, monthly)", 'field': 'period', 'type': 'choice', 'options': ['daily', 'weekly', 'monthly']},
+                    {'question': "🔔 Alert at what percentage? (e.g., 80)", 'field': 'alert_at', 'type': 'number', 'optional': True},
+                    {'question': "✅ Ready to set this budget?", 'field': 'confirm', 'type': 'confirmation'},
+                ],
+                'action': 'set_budget'
+            }
+        }
+    
+    def start_flow(self, user_id, flow_name):
+        """Start a guided flow for a user."""
+        if flow_name not in self.flows:
+            return False
+        
+        self.active_flows[user_id] = {
+            'flow_name': flow_name,
+            'step': 0,
+            'data': {},
+            'started_at': time.time()
+        }
+        
+        return True
+    
+    def get_current_step(self, user_id):
+        """Get the current step for a user."""
+        if user_id not in self.active_flows:
+            return None
+        
+        flow_state = self.active_flows[user_id]
+        flow_def = self.flows[flow_state['flow_name']]
+        
+        if flow_state['step'] >= len(flow_def['steps']):
+            return None
+        
+        return flow_def['steps'][flow_state['step']]
+    
+    def process_response(self, user_id, response):
+        """Process user response in a guided flow."""
+        if user_id not in self.active_flows:
+            return None
+        
+        flow_state = self.active_flows[user_id]
+        flow_def = self.flows[flow_state['flow_name']]
+        current_step = flow_def['steps'][flow_state['step']]
+        
+        # Process based on step type
+        if current_step['type'] == 'number':
+            try:
+                value = float(response)
+                flow_state['data'][current_step['field']] = value
+            except ValueError:
+                return f"❌ Please enter a valid number for {current_step['field']}."
+        
+        elif current_step['type'] == 'text':
+            flow_state['data'][current_step['field']] = response.strip()
+        
+        elif current_step['type'] == 'choice':
+            if response.lower() not in current_step.get('options', []):
+                options = ', '.join(current_step['options'])
+                return f"❌ Please choose from: {options}"
+            flow_state['data'][current_step['field']] = response.lower()
+        
+        elif current_step['type'] == 'confirmation':
+            if response.lower() in ['yes', 'y', 'confirm', 'ok']:
+                # Execute the flow action
+                result = self.execute_flow(user_id)
+                self.end_flow(user_id)
+                return result
+            else:
+                self.end_flow(user_id)
+                return "❌ Cancelled."
+        
+        elif current_step['type'] == 'optional':
+            if response and response.strip():
+                flow_state['data'][current_step['field']] = response.strip()
+            else:
+                flow_state['data'][current_step['field']] = ""
+        
+        # Move to next step
+        flow_state['step'] += 1
+        
+        # Check if flow is complete
+        if flow_state['step'] >= len(flow_def['steps']):
+            result = self.execute_flow(user_id)
+            self.end_flow(user_id)
+            return result
+        
+        # Return next question
+        next_step = flow_def['steps'][flow_state['step']]
+        return next_step['question']
+    
+    def execute_flow(self, user_id):
+        """Execute the completed flow."""
+        if user_id not in self.active_flows:
+            return "❌ No active flow found."
+        
+        flow_state = self.active_flows[user_id]
+        data = flow_state['data']
+        
+        if flow_state['flow_name'] == 'record_expense':
+            description = data.get('description', '')
+            category = data.get('category', '')
+            if category and not category.startswith('#'):
+                category = f"#{category}"
+            
+            full_description = f"{description} {category}".strip()
+            return record_transaction('expense', data['amount'], full_description, user_id)
+        
+        elif flow_state['flow_name'] == 'record_sale':
+            description = data.get('description', '')
+            category = data.get('category', '')
+            if category and not category.startswith('#'):
+                category = f"#{category}"
+            
+            full_description = f"{description} {category}".strip()
+            return record_transaction('sale', data['amount'], full_description, user_id)
+        
+        elif flow_state['flow_name'] == 'set_budget':
+            category_item = data.get('category_item', '')
+            amount = data.get('amount', 0)
+            period = data.get('period', 'monthly')
+            alert_at = data.get('alert_at', 80)
+            
+            if category_item and not category_item.startswith('#') and ' ' not in category_item:
+                category_item = f"#{category_item}"
+            
+            return set_budget(category_item, amount, period, user_id, alert_at)
+        
+        return "❌ Unknown flow type."
+    
+    def end_flow(self, user_id):
+        """End a guided flow for a user."""
+        if user_id in self.active_flows:
+            del self.active_flows[user_id]
+    
+    def is_in_flow(self, user_id):
+        """Check if user is in a guided flow."""
+        return user_id in self.active_flows
+
+# Create instances
+nlp = NaturalLanguageProcessor()
+proactive_assistant = ProactiveAssistant()
+guided_flow = GuidedFlow()
 
 # ==================== ENHANCED TRANSACTION FUNCTIONS (WITH ALL NEW FEATURES) ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
@@ -1436,6 +2009,9 @@ def delete_old_transaction(transaction, user_name):
     except Exception as e:
         return f"❌ Failed to delete old transaction: {str(e)[:100]}"
 
+# engine.py - PHASE 2 IMPLEMENTATION - PART 3/3
+# (Continuation from Part 2)
+
 # ==================== REPORT FUNCTIONS ====================
 def get_today_summary():
     """Get today's sales and expenses summary."""
@@ -1552,11 +2128,11 @@ def get_period_summary(period):
 💸 Total Expenses: {format_cedi(total_expenses)} ({len(expenses)} transactions)"""
     
     if income:
-        avg_income = total_income / len(income)
+        avg_income = total_income / len(income) if len(income) > 0 else 0
         message += f"\n📊 Avg Income: {format_cedi(avg_income)}"
     
     if expenses:
-        avg_expense = total_expenses / len(expenses)
+        avg_expense = total_expenses / len(expenses) if len(expenses) > 0 else 0
         message += f"\n📊 Avg Expense: {format_cedi(avg_expense)}"
     
     return message
@@ -1585,6 +2161,80 @@ def get_status():
         'status': 'connected' if spreadsheet else 'disconnected',
         'price_training': 'enabled'
     }
+
+# ==================== PHASE 2 HELPER FUNCTIONS ====================
+
+def process_natural_language(text, user_name):
+    """Process natural language and return appropriate response."""
+    # This is a wrapper that can be called from app.py if needed
+    return process_command(text, user_name)
+
+def get_conversation_context(user_name):
+    """Get conversation context for debugging."""
+    context = conversation_memory.get_context(user_name)
+    if not context:
+        return "No conversation history found."
+    
+    response = f"📝 **CONVERSATION CONTEXT FOR {user_name.upper()}**\n\n"
+    response += f"Last interaction: {time.ctime(context['last_interaction'])}\n\n"
+    
+    if context['recent_messages']:
+        response += "**Recent Messages:**\n"
+        for msg in context['recent_messages'][-5:]:  # Last 5 messages
+            role = "You" if msg['role'] == 'user' else "Bot"
+            time_str = time.strftime('%H:%M', time.localtime(msg['timestamp']))
+            content_preview = msg['content'][:50] + "..." if len(msg['content']) > 50 else msg['content']
+            response += f"{time_str} {role}: {content_preview}\n"
+    
+    if context['preferences']:
+        response += "\n**Preferences:**\n"
+        for key, value in context['preferences'].items():
+            response += f"• {key}: {value['value']}\n"
+    
+    if context['context']:
+        response += "\n**Current Context:**\n"
+        for key, value in context['context'].items():
+            response += f"• {key}: {value['value']}\n"
+    
+    return response
+
+def clear_conversation_memory(user_name):
+    """Clear conversation memory for a user."""
+    if user_name in conversation_memory.user_memories:
+        del conversation_memory.user_memories[user_name]
+    return f"✅ Cleared conversation memory for {user_name}."
+
+def get_proactive_insights(user_name):
+    """Get proactive insights for a user."""
+    patterns = proactive_assistant.detect_patterns(user_name)
+    
+    if not patterns:
+        return f"📊 No significant patterns detected for {user_name} yet. Keep recording transactions!"
+    
+    response = f"🔍 **PROACTIVE INSIGHTS FOR {user_name.upper()}**\n\n"
+    
+    for i, pattern in enumerate(patterns[:5], 1):  # Show top 5
+        response += f"{i}. {pattern.capitalize()}\n"
+    
+    # Add recommendations based on patterns
+    response += "\n💡 **RECOMMENDATIONS:**\n"
+    
+    if "haven't recorded many transactions recently" in " ".join(patterns):
+        response += "• Try to record at least one transaction daily\n"
+        response += "• Set reminders to track expenses\n"
+    
+    if "large expense" in " ".join(patterns):
+        response += "• Review large expenses for cost-saving opportunities\n"
+        response += "• Consider if any can be negotiated or reduced\n"
+    
+    if "sales amounts vary significantly" in " ".join(patterns):
+        response += "• Consider standardizing your service packages\n"
+        response += "• Track which types of sales are most profitable\n"
+    
+    # Always add general advice
+    response += "\n📈 **General advice:** Regular tracking leads to better financial decisions!"
+    
+    return response
 
 # ==================== COMPREHENSIVE HELP & TUTORIAL SYSTEM ====================
 def get_tutorial_message():
@@ -1634,12 +2284,20 @@ Bot shows: 🧮 That's ₵50.00 per chair
 Just type trained item name: `birthday basic`
 Bot suggests: "Expected range: ₵40-₵45, Suggested: ₵42.50"
 
-**STEP 6: SMART DELETION**
+**STEP 6: NATURAL LANGUAGE (NEW!)**
+Say: "Spent 100 on lunch" or "Made 500 from client"
+I'll understand and record it!
+
+**STEP 7: GUIDED MODE**
+Say: "guide me" or "help me record"
+I'll walk you through step-by-step!
+
+**STEP 8: SMART DELETION**
 `list` - Shows recent transactions with IDs
 `/delete ID:EXP-ABC123` - Deletes by ID
 `/delete last` - Deletes most recent
 
-**STEP 7: EXPLORE MORE**
+**STEP 9: EXPLORE MORE**
 • `balance` - Current profit/loss
 • `today`, `week`, `month` - Reports
 • `categories` - Spending breakdown
@@ -1650,6 +2308,7 @@ Bot suggests: "Expected range: ₵40-₵45, Suggested: ₵42.50"
 • Every transaction gets a unique ID for easy deletion
 • Price training helps catch unusual expenses
 • Budgets prevent overspending
+• Talk naturally - I understand everyday language!
 
 Type `help` for complete command reference, or just start recording!"""
 
@@ -1677,6 +2336,10 @@ def get_quick_start_guide():
 
 4. **Price History**: `price_history "coffee"`
 
+5. **Natural Language**: Say "Spent 100 on lunch" - no commands needed!
+
+6. **Guided Mode**: Say "help me record" for step-by-step help
+
 **NEED TO DELETE?**
 1. See recent: `list` or `/delete`
 2. Delete by ID: `/delete ID:XXX-XXX`
@@ -1701,13 +2364,11 @@ def get_help_message():
 • `+income [amount] [description]`
   Example: `+income 1000 Investment #investment`
 
-**💰 PRICE TRAINING (Prevent overpaying):**
-• `+train "item name" min max [unit]`
-  Example: `+train "printer paper" 60 80 per ream`
-  Example: `+train "birthday basic" 40 45 per package`
-• `+forget "item"` - Remove price training
-• `price_check "item"` - Check price range
-• `show_prices` - List all trained items
+**💬 NATURAL LANGUAGE (NEW!):**
+• "Spent 100 on lunch" → Records ₵100 expense for lunch
+• "Made 500 from client" → Records ₵500 sale
+• "Paid 200 for electricity" → Records ₵200 expense
+• Just talk naturally - I understand!
 
 **🎯 INTERACTIVE PRICE CORRECTIONS:**
 When price is unusual, bot asks:
@@ -1761,12 +2422,26 @@ When price is unusual, bot asks:
 3. Train common items to get price warnings
 4. Use budgets to prevent overspending
 5. Check price_history before big purchases
+6. Talk naturally - no need to remember commands!
 
-Need specific help? Try a command and the bot will guide you!"""
+Need specific help? Just ask in plain English!"""
 
 def get_examples_message():
     """Show practical examples of usage."""
     return """💡 **PRACTICAL EXAMPLES**
+
+**NATURAL LANGUAGE EXAMPLES:**
+1. "Spent 150 on lunch with client"
+   → Records ₵150 expense for "lunch with client"
+
+2. "Made 2000 from website project"
+   → Records ₵2000 sale for "website project"
+
+3. "Paid 300 for office internet #utilities"
+   → Records ₵300 expense for "office internet" in #utilities
+
+4. "Just had a business meeting"
+   → Asks: "How much was it?"
 
 **PRICE TRAINING EXAMPLES:**
 1. Train coffee prices:
@@ -1808,11 +2483,12 @@ def get_examples_message():
 2. `+sale 1500 Mobile app development #freelance`
 3. `+train "birthday basic" 40 45 per package`
 4. `+budget #freelance 5000 monthly 80`
-5. `price_history "coffee"`"""
+5. `price_history "coffee"`
+6. Just say: "Spent 100 on coffee" """
 
-# ==================== MAIN COMMAND PROCESSOR (UPDATED WITH ALL NEW FEATURES) ====================
+# ==================== MAIN COMMAND PROCESSOR (UPDATED WITH ALL PHASE 1 & 2 FEATURES) ====================
 def process_command(user_input, user_name="User"):
-    """Main command processor with all Phase 1 features."""
+    """Main command processor with all Phase 1 and Phase 2 features."""
     if not user_input:
         return "🤔 I'm ready to help! Need to record a transaction or check your finances?"
     
@@ -1834,7 +2510,43 @@ def process_command(user_input, user_name="User"):
     if text_lower.replace(',', '').replace(' ', '').isdigit():
         correction_response = handle_correction_response(text_lower, user_name)
         if correction_response:
+            # Add to conversation memory
+            conversation_memory.add_message(user_name, 'user', user_input)
+            conversation_memory.add_message(user_name, 'assistant', correction_response)
             return correction_response
+
+    # ==================== GUIDED FLOWS ====================
+    # Check if user is in a guided flow
+    if guided_flow.is_in_flow(user_name):
+        flow_response = guided_flow.process_response(user_name, text)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        if flow_response:
+            conversation_memory.add_message(user_name, 'assistant', flow_response)
+        return flow_response
+
+    # ==================== START GUIDED FLOWS ====================
+    # Check for guided flow triggers
+    guided_triggers = {
+        'help me record an expense': 'record_expense',
+        'help me record a sale': 'record_sale',
+        'guide me through recording': 'record_expense',
+        'step by step expense': 'record_expense',
+        'step by step sale': 'record_sale',
+        'help me set a budget': 'set_budget',
+        'guide me through budgeting': 'set_budget',
+        'i want to record something': 'record_expense',
+        'how do i record': 'record_expense',
+    }
+    
+    for trigger, flow_name in guided_triggers.items():
+        if trigger in text_lower:
+            if guided_flow.start_flow(user_name, flow_name):
+                first_step = guided_flow.get_current_step(user_name)
+                if first_step:
+                    response = f"🎯 **Guided {flow_name.replace('_', ' ').title()}**\n\n{first_step['question']}"
+                    conversation_memory.add_message(user_name, 'user', user_input)
+                    conversation_memory.add_message(user_name, 'assistant', response)
+                    return response
 
     # ==================== AUTO-SUGGEST & QUICK RECORD ====================
     
@@ -1843,7 +2555,7 @@ def process_command(user_input, user_name="User"):
         # Check if this is a known item
         suggestion = auto_suggest_price(text_lower, user_name)
         if suggestion:
-            return f"""💰 **{suggestion['item'].title()}** detected!
+            response = f"""💰 **{suggestion['item'].title()}** detected!
             
 Expected range: {format_cedi(suggestion['min'])} - {format_cedi(suggestion['max'])}
 Suggested price: {format_cedi(suggestion['suggested'])}
@@ -1854,24 +2566,9 @@ Suggested price: {format_cedi(suggestion['suggested'])}
 3. Custom amount: `+sale [amount] {suggestion['item']}`
 
 Confidence: {suggestion['confidence']}%"""
-
-    # ==================== LEARNING & HELP COMMANDS ====================
-    
-    # Tutorial
-    if text_lower in ['tutorial', 'guide', 'walkthrough', 'learn', 'howto']:
-        return get_tutorial_message()
-    
-    # Quick Start
-    elif text_lower in ['quickstart', 'quick', 'start', 'getting started']:
-        return get_quick_start_guide()
-    
-    # Examples
-    elif text_lower in ['examples', 'example', 'show me']:
-        return get_examples_message()
-    
-    # Help
-    elif text_lower in ['help', '/start', '/help', 'commands', 'menu', 'what can you do']:
-        return get_help_message()
+            conversation_memory.add_message(user_name, 'user', user_input)
+            conversation_memory.add_message(user_name, 'assistant', response)
+            return response
 
     # ==================== UNIT PRICE CALCULATION ====================
     
@@ -1883,12 +2580,17 @@ Confidence: {suggestion['confidence']}%"""
                 description = ' '.join(parts[2:])
                 result = calculate_unit_price(amount, description)
                 if result:
-                    return result
+                    response = result
                 else:
-                    return "❌ Couldn't detect quantity in description. Format: 'unitprice 500 10 chairs'"
+                    response = "❌ Couldn't detect quantity in description. Format: 'unitprice 500 10 chairs'"
             except ValueError:
-                return "❌ Invalid amount format"
-        return "❌ Format: unitprice [total] [description with quantity]"
+                response = "❌ Invalid amount format"
+        else:
+            response = "❌ Format: unitprice [total] [description with quantity]\nExample: unitprice 500 10 chairs"
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # ==================== PRICE HISTORY & TRENDS ====================
     
@@ -1903,34 +2605,37 @@ Confidence: {suggestion['confidence']}%"""
             
             trends = analyze_price_trends(item_name)
             if not trends:
-                return f"❌ Not enough price history for '{item_name}'\n💡 Record more transactions with this item to see trends."
-            
-            emoji = "📈" if trends['trend'] == 'up' else "📉" if trends['trend'] == 'down' else "➖"
-            
-            response = f"{emoji} **PRICE TRENDS: {trends['item'].title()}**\n\n"
-            response += f"• **Data Points:** {trends['data_points']} transactions\n"
-            response += f"• **Average Price:** {format_cedi(trends['average_price'])}\n"
-            response += f"• **Range:** {format_cedi(trends['min_price'])} - {format_cedi(trends['max_price'])}\n"
-            response += f"• **Recent Trend:** {trends['trend_percent']:.1f}% ({trends['trend']})\n"
-            
-            if trends['trend_percent'] > 10:
-                response += f"⚠️ **Warning:** Prices increased significantly!\n"
-            elif trends['trend_percent'] < -10:
-                response += f"✅ **Good news:** Prices decreased!\n"
-            
-            # Get recent history
-            history = get_price_history(item_name, days=30)
-            if history:
-                response += f"\n📅 **Last {len(history)} purchases:**\n"
-                for h in history[-5:]:  # Show last 5
-                    unit_price = h['price'] / h['quantity'] if h['quantity'] > 1 else h['price']
-                    response += f"• {h['date']}: {format_cedi(unit_price)}"
-                    if h['quantity'] > 1:
-                        response += f" each ({h['quantity']} {h['unit']} for {format_cedi(h['price'])})"
-                    response += "\n"
-            
-            return response
-        return "❌ Format: price_history [item]\nExample: price_history \"printer paper\""
+                response = f"❌ Not enough price history for '{item_name}'\n💡 Record more transactions with this item to see trends."
+            else:
+                emoji = "📈" if trends['trend'] == 'up' else "📉" if trends['trend'] == 'down' else "➖"
+                
+                response = f"{emoji} **PRICE TRENDS: {trends['item'].title()}**\n\n"
+                response += f"• **Data Points:** {trends['data_points']} transactions\n"
+                response += f"• **Average Price:** {format_cedi(trends['average_price'])}\n"
+                response += f"• **Range:** {format_cedi(trends['min_price'])} - {format_cedi(trends['max_price'])}\n"
+                response += f"• **Recent Trend:** {trends['trend_percent']:.1f}% ({trends['trend']})\n"
+                
+                if trends['trend_percent'] > 10:
+                    response += f"⚠️ **Warning:** Prices increased significantly!\n"
+                elif trends['trend_percent'] < -10:
+                    response += f"✅ **Good news:** Prices decreased!\n"
+                
+                # Get recent history
+                history = get_price_history(item_name, days=30)
+                if history:
+                    response += f"\n📅 **Last {len(history)} purchases:**\n"
+                    for h in history[-5:]:  # Show last 5
+                        unit_price = h['price'] / h['quantity'] if h['quantity'] > 1 else h['price']
+                        response += f"• {h['date']}: {format_cedi(unit_price)}"
+                        if h['quantity'] > 1:
+                            response += f" each ({h['quantity']} {h['unit']} for {format_cedi(h['price'])})"
+                        response += "\n"
+        else:
+            response = "❌ Format: price_history [item]\nExample: price_history \"printer paper\""
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # Compare prices command
     elif text_lower.startswith('compare ') or text_lower.startswith('best_price '):
@@ -1940,41 +2645,44 @@ Confidence: {suggestion['confidence']}%"""
             history = get_price_history(item_name, days=365)
             
             if not history:
-                return f"❌ No price history for '{item_name}'"
-            
-            # Find best and worst deals
-            unit_prices = []
-            for h in history:
-                if h['quantity'] > 0:
-                    unit_prices.append({
-                        'date': h['date'],
-                        'unit_price': h['price'] / h['quantity'],
-                        'total': h['price'],
-                        'quantity': h['quantity']
-                    })
-            
-            if not unit_prices:
-                return f"❌ Couldn't calculate unit prices for '{item_name}'"
-            
-            best_deal = min(unit_prices, key=lambda x: x['unit_price'])
-            worst_deal = max(unit_prices, key=lambda x: x['unit_price'])
-            avg_price = sum(u['unit_price'] for u in unit_prices) / len(unit_prices)
-            
-            response = f"🏷️ **PRICE COMPARISON: {item_name.title()}**\n\n"
-            response += f"✅ **Best Deal:** {format_cedi(best_deal['unit_price'])} on {best_deal['date']}\n"
-            response += f"   ({best_deal['quantity']} for {format_cedi(best_deal['total'])})\n\n"
-            response += f"❌ **Worst Deal:** {format_cedi(worst_deal['unit_price'])} on {worst_deal['date']}\n"
-            response += f"   ({worst_deal['quantity']} for {format_cedi(worst_deal['total'])})\n\n"
-            response += f"📊 **Average:** {format_cedi(avg_price)}\n"
-            response += f"📈 **Price Range:** {format_cedi(best_deal['unit_price'])} - {format_cedi(worst_deal['unit_price'])}\n"
-            response += f"📋 **Total Purchases:** {len(history)}\n"
-            
-            # Advice
-            if best_deal['unit_price'] < avg_price * 0.8:
-                response += f"\n💡 **Tip:** Try to buy when price is around {format_cedi(best_deal['unit_price'])} like on {best_deal['date']}"
-            
-            return response
-        return "❌ Format: compare [item]\nExample: compare \"coffee\""
+                response = f"❌ No price history for '{item_name}'"
+            else:
+                # Find best and worst deals
+                unit_prices = []
+                for h in history:
+                    if h['quantity'] > 0:
+                        unit_prices.append({
+                            'date': h['date'],
+                            'unit_price': h['price'] / h['quantity'],
+                            'total': h['price'],
+                            'quantity': h['quantity']
+                        })
+                
+                if not unit_prices:
+                    response = f"❌ Couldn't calculate unit prices for '{item_name}'"
+                else:
+                    best_deal = min(unit_prices, key=lambda x: x['unit_price'])
+                    worst_deal = max(unit_prices, key=lambda x: x['unit_price'])
+                    avg_price = sum(u['unit_price'] for u in unit_prices) / len(unit_prices)
+                    
+                    response = f"🏷️ **PRICE COMPARISON: {item_name.title()}**\n\n"
+                    response += f"✅ **Best Deal:** {format_cedi(best_deal['unit_price'])} on {best_deal['date']}\n"
+                    response += f"   ({best_deal['quantity']} for {format_cedi(best_deal['total'])})\n\n"
+                    response += f"❌ **Worst Deal:** {format_cedi(worst_deal['unit_price'])} on {worst_deal['date']}\n"
+                    response += f"   ({worst_deal['quantity']} for {format_cedi(worst_deal['total'])})\n\n"
+                    response += f"📊 **Average:** {format_cedi(avg_price)}\n"
+                    response += f"📈 **Price Range:** {format_cedi(best_deal['unit_price'])} - {format_cedi(worst_deal['unit_price'])}\n"
+                    response += f"📋 **Total Purchases:** {len(history)}\n"
+                    
+                    # Advice
+                    if best_deal['unit_price'] < avg_price * 0.8:
+                        response += f"\n💡 **Tip:** Try to buy when price is around {format_cedi(best_deal['unit_price'])} like on {best_deal['date']}"
+        else:
+            response = "❌ Format: compare [item]\nExample: compare \"coffee\""
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # ==================== BUDGET MANAGEMENT ====================
     
@@ -1989,16 +2697,20 @@ Confidence: {suggestion['confidence']}%"""
                 alert_at = int(parts[4]) if len(parts) > 4 else 80
                 
                 if period not in ['daily', 'weekly', 'monthly']:
-                    return "❌ Period must be: daily, weekly, monthly"
-                
-                if not (0 < alert_at <= 100):
-                    return "❌ Alert percentage must be between 1-100"
-                
-                return set_budget(category_item, budget_amount, period, user_name, alert_at)
+                    response = "❌ Period must be: daily, weekly, monthly"
+                elif not (0 < alert_at <= 100):
+                    response = "❌ Alert percentage must be between 1-100"
+                else:
+                    response = set_budget(category_item, budget_amount, period, user_name, alert_at)
                 
             except ValueError:
-                return "❌ Invalid amount format. Example: +budget #marketing 1000 monthly 80"
-        return "❌ Format: +budget [category/item] [amount] [daily/weekly/monthly] [alert_percentage]\nExample: +budget #marketing 1000 monthly 80"
+                response = "❌ Invalid amount format. Example: +budget #marketing 1000 monthly 80"
+        else:
+            response = "❌ Format: +budget [category/item] [amount] [daily/weekly/monthly] [alert_percentage]\nExample: +budget #marketing 1000 monthly 80"
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # Show budgets
     elif text_lower in ['budgets', 'my_budgets', 'show_budgets']:
@@ -2009,51 +2721,53 @@ Confidence: {suggestion['confidence']}%"""
             all_rows = worksheet.get_all_values()
             
             if len(all_rows) <= 1:
-                return "📭 No budgets set. Use +budget to create one."
-            
-            response = "💰 **YOUR BUDGETS:**\n\n"
-            
-            for row in all_rows[1:]:
-                if row and len(row) > 8 and row[8].strip() == user_name:
-                    try:
-                        category_item = row[0]
-                        budget_amount = float(row[2]) if len(row) > 2 and row[2] else 0
-                        period = row[3] if len(row) > 3 else ""
-                        current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
-                        remaining = float(row[5]) if len(row) > 5 else budget_amount
-                        status = row[10] if len(row) > 10 else "active"
-                        
-                        if status.lower() != 'active':
+                response = "📭 No budgets set. Use +budget to create one."
+            else:
+                response = "💰 **YOUR BUDGETS:**\n\n"
+                
+                for row in all_rows[1:]:
+                    if row and len(row) > 8 and row[8].strip() == user_name:
+                        try:
+                            category_item = row[0]
+                            budget_amount = float(row[2]) if len(row) > 2 and row[2] else 0
+                            period = row[3] if len(row) > 3 else ""
+                            current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
+                            remaining = float(row[5]) if len(row) > 5 else budget_amount
+                            status = row[10] if len(row) > 10 else "active"
+                            
+                            if status.lower() != 'active':
+                                continue
+                            
+                            percent_spent = (current_spent / budget_amount * 100) if budget_amount > 0 else 0
+                            
+                            # Choose emoji based on percentage
+                            if percent_spent >= 100:
+                                emoji = "❌"
+                            elif percent_spent >= 90:
+                                emoji = "⚠️"
+                            elif percent_spent >= 50:
+                                emoji = "📊"
+                            else:
+                                emoji = "✅"
+                            
+                            response += f"{emoji} **{category_item}**: {format_cedi(current_spent)} / {format_cedi(budget_amount)} {period}\n"
+                            response += f"   Remaining: {format_cedi(remaining)} | {percent_spent:.1f}% spent\n\n"
+                            
+                        except (ValueError, IndexError):
                             continue
-                        
-                        percent_spent = (current_spent / budget_amount * 100) if budget_amount > 0 else 0
-                        
-                        # Choose emoji based on percentage
-                        if percent_spent >= 100:
-                            emoji = "❌"
-                        elif percent_spent >= 90:
-                            emoji = "⚠️"
-                        elif percent_spent >= 50:
-                            emoji = "📊"
-                        else:
-                            emoji = "✅"
-                        
-                        response += f"{emoji} **{category_item}**: {format_cedi(current_spent)} / {format_cedi(budget_amount)} {period}\n"
-                        response += f"   Remaining: {format_cedi(remaining)} | {percent_spent:.1f}% spent\n\n"
-                        
-                    except (ValueError, IndexError):
-                        continue
-            
-            if alerts:
-                response += "🚨 **BUDGET ALERTS:**\n"
-                for alert in alerts:
-                    response += f"⚠️ **{alert['category_item']}**: {alert['percent_spent']:.1f}% spent!\n"
-                    response += f"   {format_cedi(alert['spent'])} of {format_cedi(alert['budget'])} (Remaining: {format_cedi(alert['remaining'])})\n\n"
-            
-            return response
+                
+                if alerts:
+                    response += "🚨 **BUDGET ALERTS:**\n"
+                    for alert in alerts:
+                        response += f"⚠️ **{alert['category_item']}**: {alert['percent_spent']:.1f}% spent!\n"
+                        response += f"   {format_cedi(alert['spent'])} of {format_cedi(alert['budget'])} (Remaining: {format_cedi(alert['remaining'])})\n\n"
             
         except Exception:
-            return "❌ Cannot access budgets."
+            response = "❌ Cannot access budgets."
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # Delete budget
     elif text_lower.startswith('+delete_budget '):
@@ -2065,16 +2779,23 @@ Confidence: {suggestion['confidence']}%"""
                 worksheet = spreadsheet.worksheet('Budgets')
                 all_rows = worksheet.get_all_values()
                 
+                deleted = False
                 for i, row in enumerate(all_rows[1:], start=2):
                     if row and len(row) > 0 and row[0].strip().lower() == category_item.lower() and row[8].strip() == user_name:
                         worksheet.update_cell(i, 11, 'deleted')  # Update status
-                        return f"✅ Deleted budget for {category_item}"
+                        deleted = True
+                        break
                 
-                return f"❌ No budget found for {category_item}"
+                response = f"✅ Deleted budget for {category_item}" if deleted else f"❌ No budget found for {category_item}"
                 
             except Exception:
-                return "❌ Cannot access budgets."
-        return "❌ Format: +delete_budget [category/item]"
+                response = "❌ Cannot access budgets."
+        else:
+            response = "❌ Format: +delete_budget [category/item]"
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # Budget summary
     elif text_lower == 'budget_summary':
@@ -2108,29 +2829,31 @@ Confidence: {suggestion['confidence']}%"""
                         continue
             
             if not active_budgets:
-                return "📭 No active budgets. Use +budget to create one."
-            
-            response = "📊 **BUDGET SUMMARY**\n\n"
-            response += f"Total Budget: {format_cedi(total_budget)}\n"
-            response += f"Total Spent: {format_cedi(total_spent)}\n"
-            response += f"Remaining: {format_cedi(total_budget - total_spent)}\n"
-            response += f"Overall Progress: {(total_spent/total_budget*100) if total_budget > 0 else 0:.1f}%\n\n"
-            
-            response += "**By Category/Item:**\n"
-            for budget in sorted(active_budgets, key=lambda x: x['percent'], reverse=True)[:10]:  # Top 10
-                emoji = "❌" if budget['percent'] >= 100 else "⚠️" if budget['percent'] >= 80 else "✅"
-                response += f"{emoji} {budget['item']}: {budget['percent']:.1f}% ({format_cedi(budget['spent'])}/{format_cedi(budget['budget'])})\n"
-            
-            # Advice
-            if total_spent > total_budget * 0.8:
-                response += "\n⚠️ **Warning:** You've used 80%+ of total budget!"
-            elif total_spent < total_budget * 0.3:
-                response += "\n✅ **Good:** You're under 30% of total budget!"
-            
-            return response
+                response = "📭 No active budgets. Use +budget to create one."
+            else:
+                response = "📊 **BUDGET SUMMARY**\n\n"
+                response += f"Total Budget: {format_cedi(total_budget)}\n"
+                response += f"Total Spent: {format_cedi(total_spent)}\n"
+                response += f"Remaining: {format_cedi(total_budget - total_spent)}\n"
+                response += f"Overall Progress: {(total_spent/total_budget*100) if total_budget > 0 else 0:.1f}%\n\n"
+                
+                response += "**By Category/Item:**\n"
+                for budget in sorted(active_budgets, key=lambda x: x['percent'], reverse=True)[:10]:  # Top 10
+                    emoji = "❌" if budget['percent'] >= 100 else "⚠️" if budget['percent'] >= 80 else "✅"
+                    response += f"{emoji} {budget['item']}: {budget['percent']:.1f}% ({format_cedi(budget['spent'])}/{format_cedi(budget['budget'])})\n"
+                
+                # Advice
+                if total_spent > total_budget * 0.8:
+                    response += "\n⚠️ **Warning:** You've used 80%+ of total budget!"
+                elif total_spent < total_budget * 0.3:
+                    response += "\n✅ **Good:** You're under 30% of total budget!"
             
         except Exception:
-            return "❌ Cannot access budgets."
+            response = "❌ Cannot access budgets."
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # ==================== PRICE TRAINING COMMANDS ====================
     
@@ -2141,65 +2864,77 @@ Confidence: {suggestion['confidence']}%"""
         
         if item_name is None:
             # Error message is in the min_price variable
-            return min_price  # This contains the error message
+            response = min_price  # This contains the error message
+        else:
+            # Validate the prices
+            try:
+                min_price = float(min_price)
+                max_price = float(max_price)
+            except (ValueError, TypeError):
+                response = "❌ Invalid price format. Use numbers like: 40 45"
+            else:
+                if min_price >= max_price:
+                    response = "❌ Minimum price must be less than maximum price."
+                elif max_price > 10000000:  # 10 million cedis sanity check
+                    response = "❌ Price seems unrealistic. Please check the amount."
+                else:
+                    response = train_price(item_name, min_price, max_price, unit, user_name)
         
-        # Validate the prices
-        try:
-            min_price = float(min_price)
-            max_price = float(max_price)
-        except (ValueError, TypeError):
-            return "❌ Invalid price format. Use numbers like: 40 45"
-        
-        if min_price >= max_price:
-            return "❌ Minimum price must be less than maximum price."
-        
-        if max_price > 10000000:  # 10 million cedis sanity check
-            return "❌ Price seems unrealistic. Please check the amount."
-        
-        return train_price(item_name, min_price, max_price, unit, user_name)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Forget Price
     elif text_lower.startswith('+forget'):
         parts = text.split()
         if len(parts) < 2:
-            return "❌ Format: +forget [item]\nExample: +forget \"printer paper\""
+            response = "❌ Format: +forget [item]\nExample: +forget \"printer paper\""
+        else:
+            item_name = ' '.join(parts[1:])
+            # Remove quotes if present
+            if item_name.startswith('"') and item_name.endswith('"'):
+                item_name = item_name[1:-1]
+            
+            response = forget_price(item_name)
         
-        item_name = ' '.join(parts[1:])
-        # Remove quotes if present
-        if item_name.startswith('"') and item_name.endswith('"'):
-            item_name = item_name[1:-1]
-        
-        return forget_price(item_name)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Price Check
     elif text_lower.startswith('price_check'):
         parts = text.split()
         if len(parts) < 2:
-            return "❌ Format: price_check [item]\nExample: price_check \"printer paper\""
+            response = "❌ Format: price_check [item]\nExample: price_check \"printer paper\""
+        else:
+            item_name = ' '.join(parts[1:])
+            # Remove quotes if present
+            if item_name.startswith('"') and item_name.endswith('"'):
+                item_name = item_name[1:-1]
+            
+            price_info = check_price(item_name, 0)  # Check without amount
+            
+            if not price_info:
+                response = f"❌ No price training found for '{item_name}'\n💡 Train it first with: +train \"{item_name}\" [min] [max]"
+            else:
+                range_info = price_info['range']
+                
+                response = f"💰 **PRICE CHECK: {range_info['item']}**\n\n"
+                response += f"Expected Range: ₵{range_info['min']:,.2f} - ₵{range_info['max']:,.2f}"
+                if range_info['unit']:
+                    response += f" {range_info['unit']}"
+                response += f"\nConfidence: {range_info['confidence']}%"
         
-        item_name = ' '.join(parts[1:])
-        # Remove quotes if present
-        if item_name.startswith('"') and item_name.endswith('"'):
-            item_name = item_name[1:-1]
-        
-        price_info = check_price(item_name, 0)  # Check without amount
-        
-        if not price_info:
-            return f"❌ No price training found for '{item_name}'\n💡 Train it first with: +train \"{item_name}\" [min] [max]"
-        
-        range_info = price_info['range']
-        
-        response = f"💰 **PRICE CHECK: {range_info['item']}**\n\n"
-        response += f"Expected Range: ₵{range_info['min']:,.2f} - ₵{range_info['max']:,.2f}"
-        if range_info['unit']:
-            response += f" {range_info['unit']}"
-        response += f"\nConfidence: {range_info['confidence']}%"
-        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
         return response
 
     # Show Prices
     elif text_lower in ['show_prices', 'list_prices', 'trained_items', 'prices']:
-        return list_trained_items()
+        response = list_trained_items()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # ==================== ORIGINAL TRANSACTION COMMANDS ====================
     
@@ -2207,86 +2942,116 @@ Confidence: {suggestion['confidence']}%"""
     elif text_lower.startswith('+sale'):
         parts = text.split()
         if len(parts) < 3:
-            return "❌ Format: +sale [amount] [description]\nExample: +sale 500 Website design\n💡 Add #hashtag to categorize: +sale 500 Website design #web"
-        try:
-            amount = float(parts[1])
-            description = ' '.join(parts[2:])
-            return record_transaction('sale', amount, description, user_name)
-        except ValueError:
-            return "❌ Amount must be a number.\n💡 Example: +sale 500 Website design"
+            response = "❌ Format: +sale [amount] [description]\nExample: +sale 500 Website design\n💡 Add #hashtag to categorize: +sale 500 Website design #web"
+        else:
+            try:
+                amount = float(parts[1])
+                description = ' '.join(parts[2:])
+                response = record_transaction('sale', amount, description, user_name)
+            except ValueError:
+                response = "❌ Amount must be a number.\n💡 Example: +sale 500 Website design"
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Record Expense
     elif text_lower.startswith('+expense'):
         parts = text.split()
         if len(parts) < 3:
-            return "❌ Format: +expense [amount] [description]\nExample: +expense 100 Office supplies\n💡 Add #hashtag to categorize: +expense 100 Office supplies #office"
-        try:
-            amount = float(parts[1])
-            description = ' '.join(parts[2:])
-            return record_transaction('expense', amount, description, user_name)
-        except ValueError:
-            return "❌ Amount must be a number.\n💡 Example: +expense 100 Office supplies"
+            response = "❌ Format: +expense [amount] [description]\nExample: +expense 100 Office supplies\n💡 Add #hashtag to categorize: +expense 100 Office supplies #office"
+        else:
+            try:
+                amount = float(parts[1])
+                description = ' '.join(parts[2:])
+                response = record_transaction('expense', amount, description, user_name)
+            except ValueError:
+                response = "❌ Amount must be a number.\n💡 Example: +expense 100 Office supplies"
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Record Income
     elif text_lower.startswith('+income'):
         parts = text.split()
         if len(parts) < 3:
-            return "❌ Format: +income [amount] [description]\nExample: +income 1000 Investment\n💡 Add #hashtag to categorize: +income 1000 Investment #investment"
-        try:
-            amount = float(parts[1])
-            description = ' '.join(parts[2:])
-            return record_transaction('income', amount, description, user_name)
-        except ValueError:
-            return "❌ Amount must be a number.\n💡 Example: +income 1000 Investment"
+            response = "❌ Format: +income [amount] [description]\nExample: +income 1000 Investment\n💡 Add #hashtag to categorize: +income 1000 Investment #investment"
+        else:
+            try:
+                amount = float(parts[1])
+                description = ' '.join(parts[2:])
+                response = record_transaction('income', amount, description, user_name)
+            except ValueError:
+                response = "❌ Amount must be a number.\n💡 Example: +income 1000 Investment"
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Check Balance
     elif text_lower in ['balance', 'profit', 'net']:
-        return get_balance()
+        response = get_balance()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Today's Summary
     elif text_lower in ['today', 'today?', 'today.']:
-        return get_today_summary()
+        response = get_today_summary()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Week Summary
     elif text_lower in ['week', 'weekly', 'this week']:
-        return get_period_summary('week')
+        response = get_period_summary('week')
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Month Summary
     elif text_lower in ['month', 'monthly', 'this month']:
-        return get_period_summary('month')
+        response = get_period_summary('month')
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Categories Report
     elif text_lower in ['categories', 'category', '/categories']:
-        return get_categories_report()
+        response = get_categories_report()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # List Transactions
     elif text_lower in ['list', 'transactions', '/list']:
         try:
             parts = text_lower.split()
             limit = int(parts[1]) if len(parts) > 1 else 10
-            return list_user_transactions(user_name, limit=min(limit, 20))
+            response = list_user_transactions(user_name, limit=min(limit, 20))
         except:
-            return list_user_transactions(user_name, limit=10)
+            response = list_user_transactions(user_name, limit=10)
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # Smart Deletion
     elif text_lower.startswith('delete') or text_lower.startswith('/delete'):
         delete_part = text_lower.replace('delete', '', 1).replace('/', '', 1).strip()
         
         if not delete_part:
-            return list_user_transactions(user_name, limit=5)
-        
+            response = list_user_transactions(user_name, limit=5)
         elif delete_part == 'last':
-            return delete_last_transaction(user_name)
-        
+            response = delete_last_transaction(user_name)
         elif delete_part.startswith('id:'):
             transaction_id = delete_part[3:].strip().upper()
-            return delete_transaction_by_id(transaction_id, user_name)
-        
+            response = delete_transaction_by_id(transaction_id, user_name)
         elif delete_part == 'list':
-            return list_user_transactions(user_name, limit=10)
-        
+            response = list_user_transactions(user_name, limit=10)
         else:
-            return """🗑️ **DELETION HELP**
+            response = """🗑️ **DELETION HELP**
 
 **HOW TO DELETE:**
 1. First, find the transaction ID:
@@ -2302,32 +3067,338 @@ Confidence: {suggestion['confidence']}%"""
 You record: `+expense 500 Test`
 It shows: "Recorded... ID: EXP-ABC123"
 You delete: `/delete ID:EXP-ABC123`"""
+        
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+
+    # ==================== PHASE 2: CONVERSATION COMMANDS ====================
+    
+    # Conversation context
+    elif text_lower in ['conversation', 'context', 'memory', 'what did i say']:
+        response = get_conversation_context(user_name)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Clear memory
+    elif text_lower in ['clear memory', 'forget me', 'reset conversation']:
+        response = clear_conversation_memory(user_name)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Proactive insights
+    elif text_lower in ['insights', 'patterns', 'what do you notice', 'analyze me']:
+        response = get_proactive_insights(user_name)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Guided flow triggers
+    elif text_lower in ['guide me', 'help me record', 'step by step', 'i need help']:
+        response = """🎯 **GUIDED MODE ACTIVATED**
+        
+I can guide you through:
+1. **Recording an expense** - Type: "help me record an expense"
+2. **Recording a sale** - Type: "help me record a sale"  
+3. **Setting a budget** - Type: "help me set a budget"
+
+Or just tell me what you want to do and I'll guide you step-by-step!"""
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # "I'm confused" handler
+    elif text_lower in ["i'm confused", "confused", "not sure", "what do i do"]:
+        response = """😅 **NO WORRIES! LET ME HELP.**
+
+**Quick Start Options:**
+1. Say what you did: "Spent 100 on lunch"
+2. Ask a question: "What's my balance?"
+3. Get guided: "Help me record an expense"
+4. See examples: "examples"
+
+**Or try these:**
+• "Just had lunch" → I'll ask how much
+• "Made 500 from client" → I'll record it as sale
+• "What did I spend on?" → I'll show categories
+
+Take your time! I'm here to help. 😊"""
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Mood-based responses
+    elif any(word in text_lower for word in ['frustrated', 'angry', 'annoyed', 'upset']):
+        response = """😔 **I UNDERSTAND THIS CAN BE FRUSTRATING.**
+
+Let's take it slow. 
+
+**Simple options:**
+1. Just tell me one thing at a time
+2. Say "guide me" for step-by-step help
+3. Or take a break and come back later
+
+I'm here to help, not to stress you out. What would make this easier for you?"""
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    elif any(word in text_lower for word in ['happy', 'excited', 'great', 'awesome', 'good job']):
+        responses = [
+            f"🎉 That's wonderful, {user_name}! I'm excited to help you succeed!",
+            f"😊 I'm glad you're happy! Let's keep this positive energy going!",
+            f"🌟 Fantastic! Your enthusiasm makes financial tracking fun!",
+            f"💪 Great attitude! With this energy, you'll master your finances in no time!"
+        ]
+        response = random.choice(responses)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+
+    # ==================== LEARNING & HELP COMMANDS ====================
+    
+    # Tutorial
+    elif text_lower in ['tutorial', 'guide', 'walkthrough', 'learn', 'howto']:
+        response = get_tutorial_message()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Quick Start
+    elif text_lower in ['quickstart', 'quick', 'start', 'getting started']:
+        response = get_quick_start_guide()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Examples
+    elif text_lower in ['examples', 'example', 'show me']:
+        response = get_examples_message()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # Help
+    elif text_lower in ['help', '/start', '/help', 'commands', 'menu', 'what can you do']:
+        response = get_help_message()
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
 
     # ==================== GREETINGS & MISCELLANEOUS ====================
     
     # Greetings
     elif text_lower in ['hi', 'hello', 'hey', 'hola', 'greetings']:
-        return f"Hello {user_name}! 👋 Ready to manage your finances?\n💡 Try `tutorial` for a step-by-step guide, or `quickstart` to jump right in!"
+        greetings = [
+            f"Hello {user_name}! 👋 Ready to manage your finances?",
+            f"Hi {user_name}! 😊 How can I help with your finances today?",
+            f"Hey {user_name}! 🌟 Let's make your finances shine!",
+            f"Greetings {user_name}! 📊 Ready to track some transactions?"
+        ]
+        response = random.choice(greetings)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
     # Thanks
     elif 'thank' in text_lower or 'thanks' in text_lower:
-        return "You're welcome! 😊 Let me know if you need anything else.\n💡 Need help? Try `tutorial` or `examples` for guidance."
+        thanks_responses = [
+            "You're welcome! 😊 Happy to help!",
+            "Anytime! 👍 Let me know if you need anything else.",
+            "Glad I could help! 💪 Keep up the good financial management!",
+            "My pleasure! 🌟 You're doing great with your tracking!"
+        ]
+        response = random.choice(thanks_responses)
+        conversation_memory.add_message(user_name, 'user', user_input)
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
     
-    # Unknown command - HELPFUL RESPONSE
+    # ==================== NATURAL LANGUAGE PROCESSING ====================
+    # If we get here, the message wasn't a structured command
+    # Try natural language processing
+    
+    # Add user message to memory
+    conversation_memory.add_message(user_name, 'user', text)
+    
+    # Detect intent
+    intent_result = nlp.detect_intent(text)
+    
+    if intent_result['intent'] == 'greeting':
+        greetings = [
+            f"Hello {user_name}! 👋 Ready to manage your finances?",
+            f"Hi {user_name}! 😊 How can I help with your finances today?",
+            f"Hey {user_name}! 🌟 Let's make your finances shine!",
+            f"Greetings {user_name}! 📊 Ready to track some transactions?"
+        ]
+        response = random.choice(greetings)
+    
+    elif intent_result['intent'] == 'thanks':
+        thanks_responses = [
+            "You're welcome! 😊 Happy to help!",
+            "Anytime! 👍 Let me know if you need anything else.",
+            "Glad I could help! 💪 Keep up the good financial management!",
+            "My pleasure! 🌟 You're doing great with your tracking!"
+        ]
+        response = random.choice(thanks_responses)
+    
+    elif intent_result['intent'] == 'record_transaction':
+        transaction = intent_result['transaction']
+        
+        # Check for missing information
+        missing_info = []
+        if not transaction.get('description'):
+            missing_info.append('description')
+        if not transaction.get('category') and '#' not in text:
+            missing_info.append('category')
+        
+        if missing_info:
+            # Store partial transaction in context
+            conversation_memory.set_context(user_name, 'partial_transaction', transaction)
+            
+            follow_up = nlp.generate_follow_up('record_transaction', {'missing': f'missing_{missing_info[0]}'})
+            response = f"📝 I understand you want to record a {transaction['type']} of {format_cedi(transaction['amount'])}.\n\n{follow_up}"
+            
+            # Store what we're waiting for
+            conversation_memory.set_context(user_name, 'awaiting_response', missing_info[0])
+        else:
+            # We have all info, record the transaction
+            description = transaction['description']
+            if transaction.get('category'):
+                if not transaction['category'].startswith('#'):
+                    description += f" #{transaction['category']}"
+                else:
+                    description += f" {transaction['category']}"
+            
+            response = record_transaction(
+                transaction['type'],
+                transaction['amount'],
+                description.strip(),
+                user_name
+            )
+    
+    elif intent_result['intent'] == 'ask_balance':
+        response = get_balance()
+    
+    elif intent_result['intent'] == 'ask_today':
+        response = get_today_summary()
+    
+    elif intent_result['intent'] == 'ask_week':
+        response = get_period_summary('week')
+    
+    elif intent_result['intent'] == 'ask_month':
+        response = get_period_summary('month')
+    
+    elif intent_result['intent'] == 'list_transactions':
+        response = list_user_transactions(user_name, limit=10)
+    
+    elif intent_result['intent'] == 'show_budgets':
+        alerts = check_budget_alerts(user_name)
+        response = "💰 Checking your budgets..."
+        # We'll show actual budgets in the structured command above
+        # This is just a placeholder for natural language
+    
+    elif intent_result['intent'] == 'financial_checkup':
+        # Get recent patterns
+        patterns = proactive_assistant.detect_patterns(user_name)
+        
+        response = f"🩺 **FINANCIAL HEALTH CHECK FOR {user_name.upper()}**\n\n"
+        
+        # Add balance
+        balance_response = get_balance()
+        response += f"{balance_response}\n\n"
+        
+        # Add today's summary
+        today_response = get_today_summary()
+        response += f"{today_response}\n\n"
+        
+        # Add patterns if any
+        if patterns:
+            response += "🔍 **NOTICED PATTERNS:**\n"
+            for pattern in patterns[:3]:  # Show top 3
+                response += f"• {pattern}\n"
+            response += "\n"
+        
+        # Add proactive insight
+        insight = proactive_assistant.get_insight()
+        response += f"💡 **INSIGHT:** {insight}"
+    
+    elif intent_result['intent'] == 'help':
+        response = get_help_message()
+    
+    # ==================== FOLLOW-UP HANDLING ====================
+    # Check if we're awaiting a follow-up response
+    awaiting = conversation_memory.get_context_value(user_name, 'awaiting_response')
+    partial_transaction = conversation_memory.get_context_value(user_name, 'partial_transaction')
+    
+    if awaiting and partial_transaction:
+        # We have a partial transaction and are waiting for more info
+        if awaiting == 'description':
+            partial_transaction['description'] = text
+            conversation_memory.set_context(user_name, 'partial_transaction', partial_transaction)
+            conversation_memory.set_context(user_name, 'awaiting_response', 'category')
+            
+            response = "📝 Got it! Now, any category? (e.g., #food, #office, or just press Enter for none)"
+        
+        elif awaiting == 'category':
+            if text.strip() and text != '':
+                if not text.startswith('#'):
+                    partial_transaction['category'] = f"#{text.strip()}"
+                else:
+                    partial_transaction['category'] = text.strip()
+            
+            # Now we have all info, record the transaction
+            description = partial_transaction.get('description', '')
+            if partial_transaction.get('category'):
+                description += f" {partial_transaction['category']}"
+            
+            response = record_transaction(
+                partial_transaction['type'],
+                partial_transaction['amount'],
+                description.strip(),
+                user_name
+            )
+            
+            # Clear context
+            conversation_memory.clear_context(user_name)
+        
+        else:
+            response = "🤔 I'm not sure what you're referring to. Can you try again?"
+        
+        conversation_memory.add_message(user_name, 'assistant', response)
+        return response
+    
+    # ==================== PROACTIVE CHECK-INS ====================
+    # Check if we should do a proactive check-in
+    if proactive_assistant.should_check_in(user_name):
+        # But only if this is a new conversation, not a response
+        context = conversation_memory.get_context(user_name)
+        if context and len(context['recent_messages']) <= 2:
+            check_in = proactive_assistant.get_check_in_message()
+            # Add a small chance to include an insight
+            if random.random() < 0.3:  # 30% chance
+                insight = proactive_assistant.get_insight()
+                response = f"{check_in}\n\n{insight}"
+            else:
+                response = check_in
+            
+            conversation_memory.add_message(user_name, 'assistant', response)
+            return response
+    
+    # ==================== DEFAULT RESPONSE ====================
+    # If we get here, we didn't understand the message
+    if 'intent' in locals() and intent_result['intent'] == 'unknown':
+        default_responses = [
+            f"🤔 I'm not sure what you mean by \"{text}\".\n\nTry `help` for a list of commands, or tell me what you'd like to do in plain English!",
+            f"😅 I didn't quite catch that. You can:\n• Type a command like `+expense 100 lunch`\n• Say something like \"Spent 100 on lunch\"\n• Ask for `help` to see all options",
+            f"✨ Need help? Try one of these:\n• Record: \"Just spent 50 on coffee\"\n• Check: \"What's my balance?\"\n• Learn: \"tutorial\" or \"guide me\"",
+        ]
+        
+        response = random.choice(default_responses)
     else:
-        return f"""🤔 I didn't understand that.
-
-**QUICK OPTIONS:**
-• Record transaction: `+expense 100 Lunch` or `+sale 500 Project`
-• Check finances: `balance`, `today`, `week`
-• Learn how: `tutorial` (beginner guide) or `quickstart` (fast start)
-• See all commands: `help`
-
-**NEW SMART FEATURES:**
-1. `+train "item" 100 200` - Train price ranges
-2. `+budget #category 1000 monthly` - Set budget
-3. `price_history "item"` - Check price trends
-4. `list` - See your recent transactions
-5. `show_prices` - See trained items
-
-What would you like to do?"""
+        # If we didn't set a response above, use a generic one
+        response = "🤔 I'm not sure what you mean. Try `help` for a list of commands or tell me what you want to do!"
+    
+    conversation_memory.add_message(user_name, 'assistant', response)
+    return response
