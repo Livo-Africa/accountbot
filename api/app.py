@@ -157,5 +157,13 @@ def get_stats():
         'status': 'online'
     })
 
-if __name__ == '__main__':
-    app.run(debug=True)
+# For Vercel deployment
+app = app  # This line might seem redundant but helps Vercel find the app
+
+# Vercel requires a handler named 'app' or explicit export
+# You can also do:
+if __name__ == "__main__":
+    app.run()
+else:
+    # For Vercel serverless
+    handler = app
