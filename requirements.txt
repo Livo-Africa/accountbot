@@ -3,3 +3,13 @@ gspread==5.9.0
 google-auth==2.17.3
 python-dotenv==1.0.0
 flask==2.3.3
+
+# Phase 1: Price Intelligence
+python-dotenv==1.0.0
+
+# Phase 2: Conversational Intelligence
+numpy==1.24.3  # For pattern analysis and calculations
+
+# Optional but recommended for production
+gunicorn==20.1.0  # For production deployment
+python-dateutil==2.8.2  # For better date handling

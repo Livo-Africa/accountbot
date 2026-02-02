@@ -1,10 +1,10 @@
-# api/app.py - OPTIONAL ENHANCEMENT
+# api/app.py - UPDATED FOR PHASE 2
 from flask import Flask, request, jsonify
 import os
 import json
 import urllib.request
 import re
-from engine import process_command, BOT_USERNAME
+from engine import process_command, BOT_USERNAME, conversation_memory
 
 app = Flask(__name__)
 
@@ -60,7 +60,13 @@ def webhook():
         chat_id = message['chat']['id']
         chat_type = message['chat']['type']
         text = message.get('text', '').strip()
-        user_name = message['from'].get('first_name', 'User')
+        
+        # Get user info
+        if 'from' in message:
+            if 'first_name' in message['from']:
+                user_name = message['from']['first_name']
+            elif 'username' in message['from']:
+                user_name = message['from']['username']
         
         # Clean the message (remove @bot mentions if present)
         clean_text = clean_message_text(text)
@@ -100,14 +106,11 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>🤖 Ledger Bot</h1>
+            <h1>Ledger AI</h1>
             <div class="status">
-                ✅ Bot is running and connected
+                ✅ running and connected
             </div>
-            <p>Use Telegram to interact with the bot.</p>
-            <p><strong>Getting Started:</strong> Message the bot and type "tutorial"</p>
-            <p><strong>Quick Help:</strong> Type "help" for all commands</p>
-        </div>
+           </div>
     </body>
     </html>
     """
@@ -120,6 +123,38 @@ def health():
     return jsonify({
         'status': 'healthy' if status['status'] == 'connected' else 'unhealthy',
         'connected': status['status'] == 'connected'
+    })
+
+# ==================== PHASE 2 API ENDPOINTS ====================
+
+@app.route('/api/conversation/<user_name>', methods=['GET'])
+def get_conversation(user_name):
+    """Get conversation context for a user (for debugging)."""
+    from engine import get_conversation_context
+    context = get_conversation_context(user_name)
+    return jsonify({'user': user_name, 'context': context})
+
+@app.route('/api/insights/<user_name>', methods=['GET'])
+def get_insights(user_name):
+    """Get proactive insights for a user."""
+    from engine import get_proactive_insights
+    insights = get_proactive_insights(user_name)
+    return jsonify({'user': user_name, 'insights': insights})
+
+@app.route('/api/clear_memory/<user_name>', methods=['POST'])
+def clear_memory(user_name):
+    """Clear conversation memory for a user."""
+    from engine import clear_conversation_memory
+    result = clear_conversation_memory(user_name)
+    return jsonify({'user': user_name, 'result': result})
+
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    """Get bot statistics."""
+    from engine import conversation_memory
+    return jsonify({
+        'active_users': len(conversation_memory.user_memories),
+        'status': 'online'
     })
 
 if __name__ == '__main__':
