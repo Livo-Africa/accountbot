@@ -1214,7 +1214,111 @@ def get_order_reminders():
             
         response = f"🔔 **ORDER REMINDER: {len(pending)} PENDING**\n\n"
         return response
-    except Exception: return "❌ Reminder failed."
+    except Exception as e:
+        return f"❌ Reminder failed: {str(e)}"
+
+# ==================== PROFIT GOALS SYSTEM ====================
+
+def ensure_goals_sheet():
+    """Ensure Goals sheet exists with proper structure."""
+    if not spreadsheet:
+        return False
+    
+    columns = ['Month', 'Year', 'Target Type', 'Target Amount', 'User', 'Status']
+    
+    try:
+        worksheet = spreadsheet.worksheet('Goals')
+        return True
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title='Goals', rows=100, cols=len(columns))
+        worksheet.append_row(columns)
+        return True
+    except Exception:
+        return False
+
+def set_goal(amount, target_type="profit", user_name="User"):
+    """Set a target goal for the current month."""
+    if not ensure_goals_sheet():
+        return "❌ Cannot access Goals sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Goals')
+        now = datetime.now()
+        month = now.strftime('%B')
+        year = now.strftime('%Y')
+        
+        # Deactivate previous goals for this month/type
+        all_rows = worksheet.get_all_values()
+        for i, row in enumerate(all_rows[1:], start=2):
+            if (len(row) >= 6 and row[0] == month and row[1] == year and 
+                row[2].lower() == target_type.lower() and row[4] == user_name):
+                worksheet.update_cell(i, 6, 'Inactive')
+        
+        # Add new goal
+        worksheet.append_row([month, year, target_type, float(amount), user_name, 'Active'])
+        
+        return f"🎯 **Goal Set for {month}!**\nTarget: {format_cedi(amount)} {target_type}\nLet's get to work! 🚀"
+    except Exception as e:
+        return f"❌ Failed to set goal: {str(e)}"
+
+def get_goal_progress(target_type="profit", user_name="User"):
+    """Calculate progress toward current month's goal."""
+    if not ensure_goals_sheet():
+        return ""
+    
+    try:
+        worksheet = spreadsheet.worksheet('Goals')
+        all_rows = worksheet.get_all_values()
+        
+        now = datetime.now()
+        month = now.strftime('%B')
+        year = now.strftime('%Y')
+        
+        active_goal = None
+        for row in all_rows[1:]:
+            if (len(row) >= 6 and row[0] == month and row[1] == year and 
+                row[2].lower() == target_type.lower() and row[4] == user_name and 
+                row[5] == 'Active'):
+                active_goal = float(row[3])
+                break
+        
+        if not active_goal:
+            return ""
+        
+        # Calculate current progress
+        current_profit = 0.0
+        if target_type.lower() == "profit":
+            # Simple profit calculation for this month
+            start_date = now.replace(day=1).strftime('%Y-%m-%d')
+            end_date = now.strftime('%Y-%m-%d')
+            
+            for sheet in ['Sales', 'Expenses', 'Income']:
+                trans = get_transactions(sheet, start_date=start_date, end_date=end_date)
+                for t in trans:
+                    if t['type'] in ['sale', 'income']:
+                        current_profit += t['amount']
+                    else:
+                        current_profit -= t['amount']
+        
+        percent = (current_profit / active_goal * 100) if active_goal > 0 else 0
+        percent = max(0, percent) # Don't show negative progress
+        
+        # Create progress bar
+        bars = int(percent / 10)
+        bar_str = "█" * min(bars, 10) + "░" * max(0, 10 - bars)
+        
+        status_msg = f"\n\n🎯 **{month} Goal Progress:**\n`[{bar_str}]` {percent:.1f}%\n"
+        status_msg += f"{format_cedi(current_profit)} / {format_cedi(active_goal)}"
+        
+        if percent >= 100:
+            status_msg += "\n🎉 **GOAL REACHED! AMAZING WORK!** 🏆"
+        elif percent >= 80:
+            status_msg += "\n🔥 So close! Push for the finish! 🚀"
+            
+        return status_msg
+        
+    except Exception:
+        return ""
 
 # ==================== SERVICE INSIGHTS SYSTEM ====================
 
@@ -1292,6 +1396,91 @@ def get_service_insights(limit=5):
         
     except Exception as e:
         return f"❌ Analysis failed: {str(e)}"
+
+# ==================== CLIENT INTELLIGENCE SYSTEM ====================
+
+def get_client_profile(search_term):
+    """Retrieve history and loyalty status for a client."""
+    if not spreadsheet:
+        return None
+        
+    try:
+        # Search in Orders first (better client data)
+        orders_ws = spreadsheet.worksheet('Orders')
+        all_orders = orders_ws.get_all_values()
+        
+        # Search in Sales (for total spending)
+        sales_ws = spreadsheet.worksheet('Sales')
+        all_sales = sales_ws.get_all_values()
+        
+        client_data = {
+            'name': search_term,
+            'contact': "",
+            'total_spent': 0.0,
+            'order_count': 0,
+            'services': [],
+            'last_order': None
+        }
+        
+        search_lower = search_term.lower()
+        
+        # Pull from Orders
+        for row in all_orders[1:]:
+            if len(row) < 5: continue
+            
+            c_name = row[2].strip()
+            c_contact = row[3].strip()
+            
+            if search_lower in c_name.lower() or search_lower in c_contact.lower():
+                client_data['name'] = c_name
+                client_data['contact'] = c_contact
+                client_data['order_count'] += 1
+                if row[4]: client_data['services'].append(row[4])
+                
+                # Track last order date
+                try: 
+                    o_date = datetime.strptime(row[1], '%Y-%m-%d')
+                    if not client_data['last_order'] or o_date > client_data['last_order']:
+                        client_data['last_order'] = o_date
+                except: pass
+        
+        # Pull from Sales (total spent)
+        for row in all_sales[1:]:
+            if len(row) < 3: continue
+            desc = row[2].lower()
+            if search_lower in desc:
+                try:
+                    client_data['total_spent'] += float(row[1])
+                except: pass
+                
+        if client_data['order_count'] == 0 and client_data['total_spent'] == 0:
+            return None
+            
+        # Determine loyalty
+        if client_data['order_count'] >= 6:
+            tier = "🥇 Gold Client"
+        elif client_data['order_count'] >= 3:
+            tier = "🥈 Silver Client"
+        else:
+            tier = "🥉 Bronze Client"
+            
+        response = f"💎 **CLIENT PROFILE: {client_data['name']}**\n"
+        response += f"Loyalty: **{tier}**\n"
+        response += f"💰 Total Spent: {format_cedi(client_data['total_spent'])}\n"
+        response += f"📦 Total Orders: {client_data['order_count']}\n"
+        
+        if client_data['last_order']:
+            response += f"🗓 Last Order: {client_data['last_order'].strftime('%b %d, %Y')}\n"
+            
+        if client_data['services']:
+            # Frequent service
+            top_service = max(set(client_data['services']), key=client_data['services'].count)
+            response += f"⭐ Top Service: {top_service}\n"
+            
+        return response
+        
+    except Exception:
+        return None
 
 # ==================== ENHANCED TRANSACTION FUNCTIONS (WITH ALL NEW FEATURES) ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
@@ -1394,11 +1583,27 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
         
         worksheet.append_row(row)
         
-        response = f"✅ Recorded {trans_type} of {format_cedi(float(amount))}"
+        # Client Intelligence: Check for returning client on sales
+        client_alert = ""
+        if trans_type.lower() == 'sale':
+            # Try to extract name from description (look for common patterns or first word)
+            potential_name = clean_description.split()[0] if clean_description else ""
+            if len(potential_name) > 2: # Avoid very short names
+                profile = get_client_profile(potential_name)
+                if profile:
+                    # Include a concise alert
+                    lines = profile.split('\n')
+                    client_alert = f"\n💡 **Returning Client Detected!**\n{lines[1]} | {lines[3]}"
+
+        # Prepare confirmation message
+        response = f"✅ Recorded {trans_type} of {format_cedi(amount)}"
         if category:
             response += f" in category: #{category}"
         response += f"\n📝 **ID:** `{transaction_id}`"
         
+        if client_alert:
+            response += client_alert
+            
         # Add unit price calculation if quantity detected
         unit_price_info = calculate_unit_price(amount, clean_description)
         if unit_price_info:
@@ -1466,9 +1671,13 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
                 response += f"Spent: {format_cedi(budget_alert['spent'])} of {format_cedi(budget_alert['budget_amount'])}\n"
                 response += f"Remaining: {format_cedi(budget_alert['remaining'])}\n"
                 response += f"Progress: {budget_alert['percent_spent']:.1f}% (alert at {budget_alert['alert_threshold']}%)"
+        
+        order_response = None
         if trans_type.lower() == 'sale':
             order_response = record_order(amount, description, user_name, linked_sale_id=transaction_id)
-            return response + "\n\n" + order_response
+            
+        if order_response:
+            response += "\n\n" + order_response
             
         return response
         
@@ -1997,7 +2206,25 @@ Bot suggests: "Expected range: ₵40-₵45, Suggested: ₵42.50"
 `/delete ID:EXP-ABC123` - Deletes by ID
 `/delete last` - Deletes most recent
 
-**STEP 8: EXPLORE MORE**
+**STEP 8: SERVICE INSIGHTS** (NEW!)
+See what's making you money:
+`insights` or `top services`
+- Bot smartly groups similar items
+- Shows Revenue, Volume, and Average Price
+
+**STEP 9: PROFIT GOALS** (NEW!)
+Stay motivated:
+`+goal 5000 profit`
+- Shows progress bars on `balance` and `today`
+- Alerts you at 80% and 100%
+
+**STEP 10: CLIENT INTELLIGENCE** (NEW!)
+Know your customers:
+`client Kofi`
+- Shows loyalty tier (🥉 Bronze, 🥈 Silver, 🥇 Gold)
+- Automatically detects returning clients during sales!
+
+**STEP 11: EXPLORE MORE**
 • `balance` - Current profit/loss
 • `today`, `week`, `month` - Reports
 • `categories` - Spending breakdown
@@ -2039,11 +2266,11 @@ def get_quick_start_guide():
 2. Delete by ID: `/delete ID:XXX-XXX`
 3. Delete last: `/delete last`
 
-**NEW: SIMPLE ORDER TRACKING**
-1. Record: `+order 40 birthday basic`
-2. Follow-up: Just reply with `Name, Number`
-3. Status: `ready [ID]` or `done [ID]`
 4. Check: `pending` or `remind`
+
+**NEW: SERVICE INSIGHTS**
+1. Type: `insights`
+2. Result: Top 5 products/services by revenue.
 
 **WANT TO ORGANIZE?**
 Add #hashtags to descriptions:
@@ -2110,7 +2337,10 @@ When price is unusual, bot asks:
 • `orders` - List 10 most recent orders
 • `search [query]` - Search for client name or ID
 • `remind` - Daily summary of pending orders
-• `insights` - View top services and business performance
+• `insights` - Detailed business performance (Top 5 services/products)
+• `+goal [amount]` - Set a profit goal for the current month
+• `goals` - Check progress toward your goal
+• `client [name]` - View client history and loyalty tier
 
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss (shows negative if in debt)
@@ -2157,6 +2387,18 @@ def get_examples_message():
    `+train "#marketing" 200 1000 monthly`
 
 **INTERACTIVE CORRECTIONS:**
+
+**INSIGHTS EXAMPLES:**
+1. `insights`
+2. `top services`
+
+**GOAL EXAMPLES:**
+1. `+goal 5000 profit`
+2. `goals`
+
+**CLIENT EXAMPLES:**
+1. `client Kofi`
+2. `client 0244123456`
 
 **BUDGET EXAMPLES:**
 1. Daily coffee budget:
@@ -2634,6 +2876,28 @@ Confidence: {suggestion['confidence']}%"""
     # Service Insights
     elif text_lower in ['insights', 'top services', 'service insights', 'reports']:
         return get_service_insights()
+
+    # Profit Goals
+    elif text_lower.startswith('+goal '):
+        parts = text.split()
+        if len(parts) >= 2:
+            try:
+                amount = float(parts[1])
+                target_type = parts[2].lower() if len(parts) > 2 else "profit"
+                return set_goal(amount, target_type, user_name)
+            except ValueError:
+                return "❌ Amount must be a number.\nExample: +goal 5000 profit"
+        return "❌ Format: +goal [amount] [type]"
+
+    elif text_lower in ['goals', 'goal', 'my goals']:
+        progress = get_goal_progress("profit", user_name)
+        return progress if progress else "🎯 No active goals for this month. Set one with `+goal [amount]`!"
+
+    # Client Intelligence
+    elif text_lower.startswith('client '):
+        name = text[7:].strip()
+        profile = get_client_profile(name)
+        return profile if profile else f"🔍 No history found for '{name}'."
 
     # ==================== ORIGINAL TRANSACTION COMMANDS ====================
     
