@@ -115,7 +115,8 @@ def handle_correction_response(user_input, user_name):
     # Find active corrections for this user
     active_corrections = []
     for trans_id, state in correction_state.states.items():
-        if state['user_id'] == user_name and time.time() < state['expires_at']:
+        # Only process transaction-level states that have state_ids
+        if state.get('user_id') == user_name and 'state_ids' in state and time.time() < state['expires_at']:
             active_corrections.append((trans_id, state))
     
     if not active_corrections:
@@ -1760,7 +1761,7 @@ When price is unusual, bot asks:
 2. Every transaction gets a unique ID for safe deletion
 3. Train common items to get price warnings
 4. Use budgets to prevent overspending
-5. Check price_history before big purchases
+5. Check `price_history` before big purchases
 
 Need specific help? Try a command and the bot will guide you!"""
 
