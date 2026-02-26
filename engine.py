@@ -1213,12 +1213,85 @@ def get_order_reminders():
             return "✅ All orders are delivered! No pending tasks."
             
         response = f"🔔 **ORDER REMINDER: {len(pending)} PENDING**\n\n"
-        for row in pending:
-            response += f"• `{row[0]}` | {row[2] or 'Unknown'}\n"
-            response += f"  {row[4]} | **{row[6]}**\n\n"
-        
         return response
     except Exception: return "❌ Reminder failed."
+
+# ==================== SERVICE INSIGHTS SYSTEM ====================
+
+def clean_service_name(description):
+    """Clean description to extract the core service name."""
+    if not description:
+        return "Unknown"
+    
+    # Remove numbers (prices, quantities)
+    clean = re.sub(r'\b\d+(\.\d+)?\b', '', description)
+    
+    # Remove hashtags
+    clean = re.sub(r'#\w+', '', clean)
+    
+    # Remove filler words
+    filler_words = ['for', 'with', 'of', 'and', 'the', 'a', 'an']
+    words = clean.lower().split()
+    words = [w for w in words if w not in filler_words]
+    
+    clean = ' '.join(words).strip()
+    return clean.title() if clean else "General Sale"
+
+def get_service_insights(limit=5):
+    """Analyze sales by description and category for business insights."""
+    if not spreadsheet:
+        return "❌ Spreadsheet connection not initialized."
+    
+    try:
+        transactions = get_transactions('Sales')
+        if not transactions:
+            return "📭 No sales data found to analyze."
+        
+        insights = {}
+        
+        for t in transactions:
+            desc = t['description']
+            cat = t['category']
+            amount = t['amount']
+            
+            # Use category if exists, otherwise clean description
+            service_name = f"#{cat}" if cat else clean_service_name(desc)
+            
+            if service_name not in insights:
+                insights[service_name] = {'count': 0, 'total': 0.0}
+            
+            insights[service_name]['count'] += 1
+            insights[service_name]['total'] += amount
+            
+        if not insights:
+            return "📭 Not enough data for insights."
+            
+        # Sort by total value (descending)
+        sorted_insights = sorted(insights.items(), key=lambda x: x[1]['total'], reverse=True)
+        
+        response = "📊 **SERVICE INSIGHTS: TOP PERFORMERS**\n\n"
+        
+        for name, data in sorted_insights[:limit]:
+            count = data['count']
+            total = data['total']
+            avg = total / count if count > 0 else 0
+            
+            response += f"• **{name}**\n"
+            response += f"  Total: {format_cedi(total)} | Sold: {count} times\n"
+            response += f"  Average Price: {format_cedi(avg)}\n\n"
+            
+        # Summary stats
+        total_rev = sum(d['total'] for n, d in sorted_insights)
+        total_qty = sum(d['count'] for n, d in sorted_insights)
+        
+        response += f"📈 **OVERALL PERFORMANCE**\n"
+        response += f"Total Revenue: {format_cedi(total_rev)}\n"
+        response += f"Service Diversity: {len(insights)} unique types\n"
+        
+        return response
+        
+    except Exception as e:
+        return f"❌ Analysis failed: {str(e)}"
 
 # ==================== ENHANCED TRANSACTION FUNCTIONS (WITH ALL NEW FEATURES) ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
@@ -2037,6 +2110,7 @@ When price is unusual, bot asks:
 • `orders` - List 10 most recent orders
 • `search [query]` - Search for client name or ID
 • `remind` - Daily summary of pending orders
+• `insights` - View top services and business performance
 
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss (shows negative if in debt)
@@ -2556,6 +2630,10 @@ Confidence: {suggestion['confidence']}%"""
 
     elif text_lower in ['remind', 'reminders', 'pending_orders']:
         return get_order_reminders()
+
+    # Service Insights
+    elif text_lower in ['insights', 'top services', 'service insights', 'reports']:
+        return get_service_insights()
 
     # ==================== ORIGINAL TRANSACTION COMMANDS ====================
     
