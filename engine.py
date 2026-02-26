@@ -23,6 +23,9 @@ BOT_USERNAME = os.environ.get('BOT_USERNAME', '').lstrip('@')
 # Global spreadsheet connection
 spreadsheet = None
 
+# Global state for interactive flows
+ORDER_STATES = {}
+
 # ==================== HELPER FUNCTIONS ====================
 def generate_transaction_id(trans_type):
     """Generate unique transaction ID: TYPE-ABC123"""
@@ -954,6 +957,269 @@ def ensure_sheet_structure(sheet_name, expected_columns, create_if_missing=False
 # Initialize connection
 initialize_spreadsheet_connection()
 
+# ==================== ORDER TRACKING SYSTEM ====================
+
+def ensure_orders_sheet():
+    """Ensure Orders sheet exists with proper structure."""
+    if not spreadsheet:
+        return False
+    
+    order_columns = [
+        'Order ID', 'Date Created', 'Client Name', 'Client Contact', 
+        'Services', 'Total Amount', 'Status', 'Payment Status', 
+        'Delivery Info', 'Notes', 'Linked Sale ID'
+    ]
+    
+    try:
+        worksheet = spreadsheet.worksheet('Orders')
+        current_headers = worksheet.row_values(1)
+        
+        # Check if all columns exist
+        if len(current_headers) < len(order_columns):
+            for i, col in enumerate(order_columns):
+                if i >= len(current_headers):
+                    worksheet.update_cell(1, i+1, col)
+        return True
+        
+    except gspread.exceptions.WorksheetNotFound:
+        # Create new sheet
+        worksheet = spreadsheet.add_worksheet(
+            title='Orders',
+            rows=1000,
+            cols=len(order_columns)
+        )
+        worksheet.append_row(order_columns)
+        return True
+    except Exception:
+        return False
+
+def record_order(amount, description, user_name, linked_sale_id="", client_name="", client_contact=""):
+    """Record a new order in the Orders sheet."""
+    if not ensure_orders_sheet():
+        return "❌ Cannot access Orders sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Orders')
+        order_id = generate_transaction_id('ORD')
+        
+        # Payment status: If from a sale, it's 'Paid'
+        payment_status = "Paid" if linked_sale_id else "Unpaid"
+        
+        row = [
+            order_id,
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            client_name,
+            client_contact,
+            description,
+            float(amount),
+            "Pending",          # Initial Status
+            payment_status,      # Initial Payment Status
+            "",                 # Delivery Info
+            f"Created by {user_name}", # Notes
+            linked_sale_id
+        ]
+        
+        worksheet.append_row(row)
+        
+        response = f"📦 **ORDER CREATED: {order_id}**\n\n"
+        response += f"Services: {description}\n"
+        response += f"Amount: {format_cedi(amount)}\n"
+        response += f"Status: Pending | {payment_status}"
+        
+        if not client_name:
+            # Trigger stateful flow if name is missing
+            ORDER_STATES[user_name] = {
+                'action': 'waiting_for_client_info',
+                'order_id': order_id,
+                'expires': time.time() + 600
+            }
+            response += "\n\n🤔 **Who is this for?**\nPlease enter: `Name, Number`"
+        
+        return response
+        
+    except Exception as e:
+        return f"❌ Failed to record order: {str(e)}"
+
+def update_order_status(order_id, status=None, payment_status=None, user_name="User"):
+    """Update order status or payment status."""
+    if not ensure_orders_sheet():
+        return "❌ Cannot access Orders sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Orders')
+        all_rows = worksheet.get_all_values()
+        
+        order_row_idx = -1
+        order_id_clean = order_id.strip().upper()
+        
+        for i, row in enumerate(all_rows[1:], start=2):
+            if row and row[0].strip().upper() == order_id_clean:
+                order_row_idx = i
+                break
+        
+        if order_row_idx == -1:
+            return f"❌ Order {order_id} not found."
+        
+        updates = []
+        if status:
+            worksheet.update_cell(order_row_idx, 7, status)
+            updates.append(f"Status ➡️ {status}")
+            # If delivered, record delivery info/date in column 9
+            if status.lower() == "delivered":
+                worksheet.update_cell(order_row_idx, 9, f"Delivered on {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        
+        if payment_status:
+            worksheet.update_cell(order_row_idx, 8, payment_status)
+            updates.append(f"Payment ➡️ {payment_status}")
+            
+        return f"✅ **Order {order_id} Updated!**\n" + "\n".join(updates)
+        
+    except Exception as e:
+        return f"❌ Update failed: {str(e)}"
+
+def get_orders(limit=10, pending_only=False):
+    """List recent or pending orders."""
+    if not ensure_orders_sheet():
+        return "❌ Cannot access Orders sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Orders')
+        all_rows = worksheet.get_all_values()
+        
+        if len(all_rows) <= 1:
+            return "📭 No orders found."
+        
+        headers = all_rows[0]
+        orders = []
+        
+        for row in all_rows[1:]:
+            if not row: continue
+            
+            status = row[6] if len(row) > 6 else ""
+            if pending_only and status.lower() in ["delivered", "cancelled"]:
+                continue
+                
+            orders.append(row)
+            
+        if not orders:
+            return "📭 No active orders found."
+            
+        # Sort by date (descending)
+        orders.reverse()
+        
+        response = "📦 **RECENT ORDERS:**\n\n" if not pending_only else "⏳ **PENDING ORDERS:**\n\n"
+        
+        for row in orders[:limit]:
+            oid = row[0]
+            client = row[2] if row[2] else "Unknown"
+            service = row[4]
+            amount = row[5]
+            status = row[6]
+            pay = row[7]
+            
+            response += f"• `{oid}` | {client}\n"
+            response += f"  {service} | {format_cedi(amount)}\n"
+            response += f"  Status: **{status}** | {pay}\n\n"
+            
+        return response
+        
+    except Exception as e:
+        return f"❌ Error fetching orders: {str(e)}"
+
+def search_orders(query):
+    """Search orders by name or ID."""
+    if not ensure_orders_sheet():
+        return "❌ Cannot access Orders sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Orders')
+        all_rows = worksheet.get_all_values()
+        query = query.lower().strip()
+        
+        results = []
+        for row in all_rows[1:]:
+            if not row: continue
+            # Search in ID, Client Name, or Services
+            search_str = f"{row[0]} {row[2]} {row[4]}".lower()
+            if query in search_str:
+                results.append(row)
+                
+        if not results:
+            return f"🔍 No orders found matching '{query}'"
+            
+        response = f"🔍 **SEARCH RESULTS: '{query}'**\n\n"
+        for row in results[:10]:
+            response += f"• `{row[0]}` | {row[2] or 'Unknown'}\n"
+            response += f"  {row[4]} | {format_cedi(row[5])}\n"
+            response += f"  Status: {row[6]} | {row[7]}\n\n"
+            
+        return response
+    except Exception as e:
+        return f"❌ Search failed: {str(e)}"
+
+def handle_order_state(user_input, user_name):
+    """Handle stateful interactive flows for orders."""
+    state = ORDER_STATES.get(user_name)
+    if not state or time.time() > state['expires']:
+        if state: del ORDER_STATES[user_name]
+        return None
+    
+    order_id = state['order_id']
+    
+    if state['action'] == 'waiting_for_client_info':
+        # Split by comma or space
+        parts = [p.strip() for p in re.split(r'[,|]', user_input)]
+        name = parts[0] if len(parts) > 0 else "Unknown"
+        contact = parts[1] if len(parts) > 1 else ""
+        
+        try:
+            worksheet = spreadsheet.worksheet('Orders')
+            all_rows = worksheet.get_all_values()
+            row_idx = -1
+            for i, row in enumerate(all_rows[1:], start=2):
+                if row and row[0].strip().upper() == order_id.upper():
+                    row_idx = i
+                    break
+            
+            if row_idx != -1:
+                worksheet.update_cell(row_idx, 3, name)   # Client Name
+                worksheet.update_cell(row_idx, 4, contact) # Client Contact
+                
+                del ORDER_STATES[user_name]
+                return f"✅ **Order {order_id} Updated!**\nClient: {name}\nContact: {contact}\n\nType `pending` to see all orders."
+            
+        except Exception as e:
+            return f"❌ Failed to update order info: {str(e)}"
+            
+    return None
+
+def get_order_reminders():
+    """Summary of all pending and in-progress orders."""
+    if not ensure_orders_sheet(): return "❌ Cannot access Orders."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Orders')
+        all_rows = worksheet.get_all_values()
+        if len(all_rows) <= 1: return "📭 No orders found."
+        
+        pending = []
+        for row in all_rows[1:]:
+            if not row: continue
+            status = row[6].lower()
+            if status in ["pending", "in progress", "ready for delivery"]:
+                pending.append(row)
+        
+        if not pending:
+            return "✅ All orders are delivered! No pending tasks."
+            
+        response = f"🔔 **ORDER REMINDER: {len(pending)} PENDING**\n\n"
+        for row in pending:
+            response += f"• `{row[0]}` | {row[2] or 'Unknown'}\n"
+            response += f"  {row[4]} | **{row[6]}**\n\n"
+        
+        return response
+    except Exception: return "❌ Reminder failed."
+
 # ==================== ENHANCED TRANSACTION FUNCTIONS (WITH ALL NEW FEATURES) ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
     """Record a transaction with interactive price checking and all new features."""
@@ -1127,7 +1393,10 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
                 response += f"Spent: {format_cedi(budget_alert['spent'])} of {format_cedi(budget_alert['budget_amount'])}\n"
                 response += f"Remaining: {format_cedi(budget_alert['remaining'])}\n"
                 response += f"Progress: {budget_alert['percent_spent']:.1f}% (alert at {budget_alert['alert_threshold']}%)"
-        
+        if trans_type.lower() == 'sale':
+            order_response = record_order(amount, description, user_name, linked_sale_id=transaction_id)
+            return response + "\n\n" + order_response
+            
         return response
         
     except Exception as e:
@@ -1830,6 +2099,11 @@ def process_command(user_input, user_name="User"):
     # Clean punctuation
     text_lower = re.sub(r'^[:\s]+|[:\s]+$', '', text_lower)
 
+    # ==================== INTERACTIVE ORDER FLOWS ====================
+    order_state_response = handle_order_state(text, user_name)
+    if order_state_response:
+        return order_state_response
+
     # ==================== INTERACTIVE CORRECTIONS ====================
     # Check if this is a response to price correction
     if text_lower.replace(',', '').replace(' ', '').isdigit():
@@ -2201,6 +2475,47 @@ Confidence: {suggestion['confidence']}%"""
     # Show Prices
     elif text_lower in ['show_prices', 'list_prices', 'trained_items', 'prices']:
         return list_trained_items()
+
+    # ==================== ORDER TRACKING COMMANDS ====================
+    
+    # +order command
+    elif text_lower.startswith('+order'):
+        parts = text.split()
+        if len(parts) < 3:
+            return "❌ Format: +order [amount] [description]\nExample: +order 40 birthday basic"
+        try:
+            amount = float(parts[1])
+            description = ' '.join(parts[2:])
+            return record_order(amount, description, user_name)
+        except ValueError:
+            return "❌ Amount must be a number."
+
+    # Status updates: done, ready, paid
+    elif text_lower.startswith('done '):
+        order_id = text[5:].strip().upper()
+        return update_order_status(order_id, status="Delivered", payment_status="Paid", user_name=user_name)
+
+    elif text_lower.startswith('ready '):
+        order_id = text[6:].strip().upper()
+        return update_order_status(order_id, status="Ready for Delivery", user_name=user_name)
+
+    elif text_lower.startswith('paid '):
+        order_id = text[5:].strip().upper()
+        return update_order_status(order_id, payment_status="Paid", user_name=user_name)
+
+    # Retrieval: orders, pending, search, remind
+    elif text_lower == 'orders':
+        return get_orders(limit=10)
+
+    elif text_lower == 'pending':
+        return get_orders(limit=20, pending_only=True)
+
+    elif text_lower.startswith('search '):
+        query = text[7:].strip()
+        return search_orders(query)
+
+    elif text_lower in ['remind', 'reminders', 'pending_orders']:
+        return get_order_reminders()
 
     # ==================== ORIGINAL TRANSACTION COMMANDS ====================
     
