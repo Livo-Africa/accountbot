@@ -1320,6 +1320,155 @@ def get_goal_progress(target_type="profit", user_name="User"):
     except Exception:
         return ""
 
+# ==================== RECURRING TRANSACTIONS SYSTEM ====================
+
+def ensure_recurring_sheet():
+    """Ensure Recurring sheet exists with proper structure."""
+    if not spreadsheet:
+        return False
+    
+    columns = ['Type', 'Amount', 'Description', 'Frequency', 'Last Recorded', 'User', 'Status']
+    
+    try:
+        spreadsheet.worksheet('Recurring')
+        return True
+    except gspread.exceptions.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title='Recurring', rows=100, cols=len(columns))
+        worksheet.append_row(columns)
+        return True
+    except Exception:
+        return False
+
+def add_recurring_transaction(trans_type, amount, description, frequency, user_name="User"):
+    """Save a template for recurring transactions."""
+    if not ensure_recurring_sheet():
+        return "❌ Cannot access Recurring sheet."
+    
+    try:
+        worksheet = spreadsheet.worksheet('Recurring')
+        
+        freq_lower = frequency.lower()
+        if freq_lower not in ['daily', 'weekly', 'monthly']:
+            return "❌ Frequency must be 'daily', 'weekly', or 'monthly'."
+            
+        worksheet.append_row([
+            trans_type.lower(), 
+            float(amount), 
+            description, 
+            freq_lower, 
+            "Never", # Last Recorded
+            user_name, 
+            'Active'
+        ])
+        
+        return f"🔄 **Recurring {trans_type} added!**\nAmount: {format_cedi(amount)}\nFrequency: {frequency.title()}\nDescription: {description}"
+    except Exception as e:
+        return f"❌ Failed to add recurring transaction: {str(e)}"
+
+def check_recurring_due(user_name="User", auto_record=False):
+    """Check for recurring items that are due for recording."""
+    if not spreadsheet:
+        return "❌ Spreadsheet connection not initialized."
+        
+    try:
+        worksheet = spreadsheet.worksheet('Recurring')
+        all_rows = worksheet.get_all_values()
+        
+        due_items = []
+        today = datetime.now().date()
+        
+        for i, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= 7 and row[5] == user_name and row[6].lower() == 'active':
+                trans_type = row[0]
+                amount = float(row[1])
+                desc = row[2]
+                freq = row[3].lower()
+                last_recorded_str = row[4]
+                
+                due = False
+                if last_recorded_str == "Never":
+                    due = True
+                else:
+                    try:
+                        last_recorded = datetime.strptime(last_recorded_str, '%Y-%m-%d').date()
+                        if freq == 'daily' and today > last_recorded:
+                            due = True
+                        elif freq == 'weekly' and today >= last_recorded + timedelta(days=7):
+                            due = True
+                        elif freq == 'monthly':
+                            # check if it's been at least 28 days and the month is different
+                            if today.month != last_recorded.month or today.year != last_recorded.year:
+                                if today.day >= last_recorded.day or (today.day >= 28 and last_recorded.day >= 28):
+                                    due = True
+                    except:
+                        due = True # if date parsing fails, treat as due
+                
+                if due:
+                    due_items.append({
+                        'row_idx': i,
+                        'type': trans_type,
+                        'amount': amount,
+                        'desc': desc,
+                        'freq': freq
+                    })
+        
+        if not due_items:
+            return "" # Nothing due
+            
+        if auto_record:
+            results = []
+            for item in due_items:
+                res = record_transaction(item['type'], item['amount'], item['desc'], user_name)
+                # Update last recorded date
+                worksheet.update_cell(item['row_idx'], 5, today.strftime('%Y-%m-%d'))
+                results.append(f"✅ Auto-recorded: {item['desc']}")
+            return "\n".join(results)
+        else:
+            msg = f"🔄 **{len(due_items)} Recurring Items Due:**\n"
+            for item in due_items:
+                msg += f"• {item['desc']} ({format_cedi(item['amount'])})\n"
+            msg += "\n💡 Type `record due` to post them all now."
+            return msg
+            
+    except Exception as e:
+        return f"❌ Check recurring failed: {str(e)}"
+
+# ==================== SMART EXPENSE AUDIT SYSTEM ====================
+
+def get_category_averages(user_name="User", days=30):
+    """Calculate average spending per category over the last X days."""
+    try:
+        start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+        expenses = get_transactions('Expenses', start_date=start_date, user_filter=user_name)
+        
+        stats = {}
+        for e in expenses:
+            cat = e['category'] or 'Uncategorized'
+            if cat not in stats:
+                stats[cat] = []
+            stats[cat].append(e['amount'])
+            
+        averages = {}
+        for cat, amounts in stats.items():
+            averages[cat] = sum(amounts) / len(amounts)
+            
+        return averages
+    except Exception:
+        return {}
+
+def audit_expense(category, amount, user_name="User"):
+    """Check if an expense is a spending spike compared to history."""
+    averages = get_category_averages(user_name)
+    cat_key = category if category else 'Uncategorized'
+    
+    if cat_key in averages:
+        avg = averages[cat_key]
+        if amount > avg * 1.5:
+            percent = ((amount / avg) - 1) * 100
+            return f"\n⚠️ **SPENDING SPIKE!** This is {percent:.0f}% higher than your usual average for #{category} ({format_cedi(avg)})."
+    
+    return ""
+
 # ==================== SERVICE INSIGHTS SYSTEM ====================
 
 def clean_service_name(description):
@@ -1672,6 +1821,12 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
                 response += f"Remaining: {format_cedi(budget_alert['remaining'])}\n"
                 response += f"Progress: {budget_alert['percent_spent']:.1f}% (alert at {budget_alert['alert_threshold']}%)"
         
+        # Smart Expense Audit for expenses
+        if trans_type.lower() == 'expense':
+            audit_msg = audit_expense(category, amount, user_name)
+            if audit_msg:
+                response += f"\n{audit_msg}"
+        
         order_response = None
         if trans_type.lower() == 'sale':
             order_response = record_order(amount, description, user_name, linked_sale_id=transaction_id)
@@ -1786,7 +1941,19 @@ def get_balance():
     elif balance == 0:
         return f"💰 Current Balance: ₵0.00 ({transaction_count} transactions)"
     else:
-        return f"💰 Current Balance: +₵{balance:,.2f} ({transaction_count} transactions)"
+        response = f"💰 Current Balance: +₵{balance:,.2f} ({transaction_count} transactions)"
+    
+    # Add profit goal progress
+    goal_progress = get_goal_progress("profit")
+    if goal_progress:
+        response += goal_progress
+        
+    # Check for due recurring items
+    recurring_msg = check_recurring_due(user_name="User")
+    if recurring_msg:
+        response += f"\n\n{recurring_msg}"
+        
+    return response
 
 # ==================== SMART DELETION SYSTEM ====================
 def list_user_transactions(user_name, limit=10):
@@ -2025,6 +2192,16 @@ def get_today_summary():
         top_expense = max(expenses, key=lambda x: x['amount'])
         message += f"\n💸 Top Expense: {format_cedi(top_expense['amount'])}"
     
+    # Add profit goal progress
+    goal_progress = get_goal_progress("profit")
+    if goal_progress:
+        message += goal_progress
+        
+    # Check for due recurring items
+    recurring_msg = check_recurring_due(user_name="User")
+    if recurring_msg:
+        message += f"\n\n{recurring_msg}"
+        
     return message
 
 def get_categories_report():
@@ -2111,6 +2288,17 @@ def get_period_summary(period):
         avg_expense = total_expenses / len(expenses)
         message += f"\n📊 Avg Expense: {format_cedi(avg_expense)}"
     
+    # Add profit goal progress for current month
+    if period == 'month':
+        goal_progress = get_goal_progress("profit")
+        if goal_progress:
+            message += goal_progress
+        
+        # Check for due recurring items
+        recurring_msg = check_recurring_due(user_name="User")
+        if recurring_msg:
+            message += f"\n\n{recurring_msg}"
+            
     return message
 
 def get_date_range(period):
@@ -2224,7 +2412,18 @@ Know your customers:
 - Shows loyalty tier (🥉 Bronze, 🥈 Silver, 🥇 Gold)
 - Automatically detects returning clients during sales!
 
-**STEP 11: EXPLORE MORE**
+**STEP 11: RECURRING BILLS** (NEW!)
+Auto-record regular expenses/sales:
+`+recurring expense 1000 monthly Rent`
+- Bot checks if items are due daily
+- Type `record due` to post them all
+
+**STEP 12: SMART EXPENSE AUDIT** (NEW!)
+Bot learns your spending habits:
+- Alerts you if an expense is 50% higher than your category average
+- Helps catch overspending early!
+
+**STEP 13: EXPLORE MORE**
 • `balance` - Current profit/loss
 • `today`, `week`, `month` - Reports
 • `categories` - Spending breakdown
@@ -2341,6 +2540,8 @@ When price is unusual, bot asks:
 • `+goal [amount]` - Set a profit goal for the current month
 • `goals` - Check progress toward your goal
 • `client [name]` - View client history and loyalty tier
+• `+recurring [type] [amount] [freq] [desc]` - Set regular entry
+• `record due` - Post all due recurring transactions
 
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss (shows negative if in debt)
@@ -2399,6 +2600,11 @@ def get_examples_message():
 **CLIENT EXAMPLES:**
 1. `client Kofi`
 2. `client 0244123456`
+
+**RECURRING EXAMPLES:**
+1. `+recurring expense 1000 monthly Office Rent`
+2. `+recurring expense 50 daily Staff Lunch`
+3. `record due`
 
 **BUDGET EXAMPLES:**
 1. Daily coffee budget:
@@ -2898,6 +3104,24 @@ Confidence: {suggestion['confidence']}%"""
         name = text[7:].strip()
         profile = get_client_profile(name)
         return profile if profile else f"🔍 No history found for '{name}'."
+
+    # Recurring Transactions
+    elif text_lower.startswith('+recurring '):
+        # Format: +recurring [sale/expense] [amount] [freq] [desc]
+        parts = text.split()
+        if len(parts) >= 5:
+            try:
+                trans_type = parts[1].lower()
+                amount = float(parts[2])
+                freq = parts[3].lower()
+                desc = ' '.join(parts[4:])
+                return add_recurring_transaction(trans_type, amount, desc, freq, user_name)
+            except ValueError:
+                return "❌ Amount must be a number."
+        return "❌ Format: +recurring [sale/expense] [amount] [daily/weekly/monthly] [description]"
+
+    elif text_lower == 'record due':
+        return check_recurring_due(user_name, auto_record=True)
 
     # ==================== ORIGINAL TRANSACTION COMMANDS ====================
     
