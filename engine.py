@@ -1900,16 +1900,31 @@ Bot shows: 🧮 That's ₵50.00 per chair
 `budgets` - Shows all budgets
 `budget_summary` - Overall budget status
 
-**STEP 5: AUTO-SUGGESTIONS**
+**STEP 5: ORDER TRACKING SYSTEM** (NEW!)
+Record orders and track their progress easily:
+1. Record: `+order 40 birthday basic`
+   - Bot asks: *"Who is this for? (Name, Number)"*
+   - Reply: `Kofi, 0244123456`
+   
+2. Tracking:
+   - `pending` - Shows all active orders
+   - `orders` - Shows 10 most recent orders
+   - `remind` - Daily summary of pending tasks
+
+3. Fast Updates:
+   - `ready ORD-123` - Mark as ready
+   - `done ORD-123` - Mark as delivered & paid
+
+**STEP 6: AUTO-SUGGESTIONS**
 Just type trained item name: `birthday basic`
 Bot suggests: "Expected range: ₵40-₵45, Suggested: ₵42.50"
 
-**STEP 6: SMART DELETION**
+**STEP 7: SMART DELETION**
 `list` - Shows recent transactions with IDs
 `/delete ID:EXP-ABC123` - Deletes by ID
 `/delete last` - Deletes most recent
 
-**STEP 7: EXPLORE MORE**
+**STEP 8: EXPLORE MORE**
 • `balance` - Current profit/loss
 • `today`, `week`, `month` - Reports
 • `categories` - Spending breakdown
@@ -1917,9 +1932,8 @@ Bot suggests: "Expected range: ₵40-₵45, Suggested: ₵42.50"
 
 📌 **QUICK TIPS:**
 • Use #hashtags to categorize (e.g., #office, #marketing)
-• Every transaction gets a unique ID for easy deletion
-• Price training helps catch unusual expenses
-• Budgets prevent overspending
+• Every sale (`+sale`) automatically creates a linked order!
+• Type `remind` every morning to see your to-do list.
 
 Type `help` for complete command reference, or just start recording!"""
 
@@ -1952,10 +1966,18 @@ def get_quick_start_guide():
 2. Delete by ID: `/delete ID:XXX-XXX`
 3. Delete last: `/delete last`
 
+**NEW: SIMPLE ORDER TRACKING**
+1. Record: `+order 40 birthday basic`
+2. Follow-up: Just reply with `Name, Number`
+3. Status: `ready [ID]` or `done [ID]`
+4. Check: `pending` or `remind`
+
 **WANT TO ORGANIZE?**
 Add #hashtags to descriptions:
 • `+expense 500 #marketing Facebook ads`
 • `+sale 2000 #web_design Website project`
+
+**PRIVATE SECRETARY:** Every `+sale` automatically creates an order for you to track!
 
 **THAT'S IT!** Start recording and the bot will guide you."""
 
@@ -2006,6 +2028,16 @@ When price is unusual, bot asks:
 • `+delete_budget [category/item]` - Delete budget
 • `budget_summary` - Overall budget status
 
+**📦 ORDER TRACKING (NEW):**
+• `+order [amount] [description]` - Record a new order
+• `done [ID]` - Mark order as Delivered & Paid
+• `ready [ID]` - Mark order as Ready for Delivery
+• `paid [ID]` - Mark order as Paid
+• `pending` - List all active orders
+• `orders` - List 10 most recent orders
+• `search [query]` - Search for client name or ID
+• `remind` - Daily summary of pending orders
+
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss (shows negative if in debt)
 • `today` - Today's income vs expenses
@@ -2027,10 +2059,9 @@ When price is unusual, bot asks:
 
 **💡 PRO TIPS:**
 1. Add #hashtags to automatically categorize
-2. Every transaction gets a unique ID for safe deletion
-3. Train common items to get price warnings
-4. Use budgets to prevent overspending
-5. Check `price_history` before big purchases
+2. Every sale (`+sale`) automatically creates a linked order!
+3. Reply to bot's question with `Name, Contact` to update orders
+4. Use `remind` to never miss an order deadline
 
 Need specific help? Try a command and the bot will guide you!"""
 
@@ -2073,12 +2104,21 @@ def get_examples_message():
 3. `unitprice 750 15kg rice`
    → 🧮 That's ₵50.00 per kg
 
+**ORDER TRACKING EXAMPLES:**
+1. `+order 40 birthday basic`
+   → Bot: "Who is this for?"
+   → You: `Abena, 0244111222`
+2. `done ORD-A1B2`
+3. `pending`
+4. `remind`
+
 **TRY THESE:**
 1. `+expense 80 Lunch with team #team_building`
 2. `+sale 1500 Mobile app development #freelance`
 3. `+train "birthday basic" 40 45 per package`
 4. `+budget #freelance 5000 monthly 80`
-5. `price_history "coffee"`"""
+5. `price_history "coffee"`
+6. `remind`"""
 
 # ==================== MAIN COMMAND PROCESSOR (UPDATED WITH ALL NEW FEATURES) ====================
 def process_command(user_input, user_name="User"):
