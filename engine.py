@@ -5,9 +5,18 @@ import gspread
 import re
 import secrets
 import time
+import io
+import requests
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
+
+# ReportLab imports
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+from reportlab.lib.units import inch
 
 # ==================== CONFIGURATION ====================
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
@@ -19,6 +28,16 @@ TYPE_TO_SHEET = {
 }
 
 BOT_USERNAME = os.environ.get('BOT_USERNAME', '').lstrip('@')
+
+# ==================== BUSINESS PROFILE ====================
+BUSINESS_PROFILE = {
+    "name": "Radikal Creative Technologies",
+    "logo_url": "https://i.postimg.cc/3NNYCZgm/radikal-logo.jpg",
+    "address": "East Airport, Accra",
+    "phone": "0207472307",
+    "payable_to": "Redeemer Afi Dzorgbesi",
+    "footer": "Thank you for choosing Radikal Creative Technologies! 🚀"
+}
 
 # Global spreadsheet connection
 spreadsheet = None
@@ -1546,6 +1565,181 @@ def get_service_insights(limit=5):
     except Exception as e:
         return f"❌ Analysis failed: {str(e)}"
 
+# ==================== PDF EXPORT & INVOICING SYSTEM ====================
+
+def get_logo_image(url):
+    """Download logo and return as ReportLab Image if possible."""
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            img_data = io.BytesIO(response.content)
+            img = Image(img_data)
+            # Resize logo to fit nicely
+            aspect = img.imageWidth / img.imageHeight
+            img.drawHeight = 0.5 * inch
+            img.drawWidth = 0.5 * aspect * inch
+            return img
+    except:
+        pass
+    return None
+
+def generate_financial_report_pdf(period='month'):
+    """Generate a PDF financial report for a given period."""
+    if not spreadsheet:
+        return None, "❌ Not connected to database."
+        
+    start_date, end_date = get_date_range(period)
+    all_trans = []
+    for sheet in ['Sales', 'Expenses', 'Income']:
+        all_trans.extend(get_transactions(sheet, start_date=start_date, end_date=end_date))
+    
+    if not all_trans:
+        return None, "📭 No transactions found for this period."
+        
+    all_trans.sort(key=lambda x: x['date'])
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # Header
+    logo = get_logo_image(BUSINESS_PROFILE['logo_url'])
+    if logo:
+        elements.append(logo)
+        elements.append(Spacer(1, 0.1 * inch))
+        
+    elements.append(Paragraph(f"<b>{BUSINESS_PROFILE['name']}</b>", styles['Title']))
+    elements.append(Paragraph(f"Financial Report: {period.upper()}LY", styles['Heading2']))
+    elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
+    elements.append(Spacer(1, 0.2 * inch))
+    
+    # Table Data
+    data = [['Date', 'Type', 'Description', 'Category', 'Amount']]
+    total_income = 0
+    total_expense = 0
+    
+    for t in all_trans:
+        is_income = t['type'] in ['sale', 'income']
+        amount = t['amount']
+        if is_income: total_income += amount
+        else: total_expense += amount
+        
+        data.append([
+            t['date'],
+            t['type'].upper(),
+            t['description'][:30],
+            t['category'] or "-",
+            format_cedi(amount)
+        ])
+        
+    # Table Styling
+    t = Table(data, hAlign='LEFT')
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 0.3 * inch))
+    
+    # Summary
+    elements.append(Paragraph(f"<b>Total Income:</b> {format_cedi(total_income)}", styles['Normal']))
+    elements.append(Paragraph(f"<b>Total Expense:</b> {format_cedi(total_expense)}", styles['Normal']))
+    net = total_income - total_expense
+    elements.append(Paragraph(f"<b>NET PROFIT:</b> {format_cedi(net)}", styles['Heading3']))
+    
+    # Footer
+    elements.append(Spacer(1, 0.5 * inch))
+    elements.append(Paragraph(BUSINESS_PROFILE['footer'], styles['Italic']))
+    
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer, f"{period}_report_{start_date}.pdf"
+
+def generate_invoice_pdf(order_id):
+    """Generate a professional PDF invoice for a specific order."""
+    if not spreadsheet:
+        return None, "❌ Not connected to database."
+        
+    # Find the order
+    worksheet = spreadsheet.worksheet('Orders')
+    all_rows = worksheet.get_all_values()
+    order_row = None
+    for row in all_rows[1:]:
+        if len(row) > 0 and row[0] == order_id:
+            order_row = row
+            break
+            
+    if not order_row:
+        return None, f"❌ Order {order_id} not found."
+        
+    # Order Details: ID[0], Date[1], Name[2], Contact[3], Service[4], Amount[5], Status[6]
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    elements = []
+    styles = getSampleStyleSheet()
+    
+    # Custom styles
+    header_style = ParagraphStyle('HeaderStyle', parent=styles['Normal'], fontSize=10, leading=12)
+    
+    # Logo & Company Details
+    logo = get_logo_image(BUSINESS_PROFILE['logo_url'])
+    if logo:
+        elements.append(logo)
+        
+    elements.append(Paragraph(f"<b>{BUSINESS_PROFILE['name']}</b>", styles['Title']))
+    elements.append(Paragraph(f"{BUSINESS_PROFILE['address']}", header_style))
+    elements.append(Paragraph(f"Phone: {BUSINESS_PROFILE['phone']}", header_style))
+    elements.append(Spacer(1, 0.3 * inch))
+    
+    # Invoice Title & Client Info
+    elements.append(Paragraph(f"<b>INVOICE</b>", styles['Heading1']))
+    elements.append(Paragraph(f"<b>Invoice #:</b> {order_id}", styles['Normal']))
+    elements.append(Paragraph(f"<b>Date:</b> {order_row[1]}", styles['Normal']))
+    elements.append(Spacer(1, 0.2 * inch))
+    
+    elements.append(Paragraph(f"<b>BILL TO:</b>", styles['Heading4']))
+    elements.append(Paragraph(f"{order_row[2]}", styles['Normal']))
+    elements.append(Paragraph(f"{order_row[3]}", styles['Normal']))
+    elements.append(Spacer(1, 0.3 * inch))
+    
+    # Items Table
+    data = [
+        ['Description', 'Quantity', 'Unit Price', 'Total'],
+        [order_row[4], '1', format_cedi(float(order_row[5])), format_cedi(float(order_row[5]))]
+    ]
+    
+    t = Table(data, colWidths=[3 * inch, 1 * inch, 1.5 * inch, 1.5 * inch])
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 0.4 * inch))
+    
+    # Total & Payment Instructions
+    elements.append(Paragraph(f"<b>TOTAL DUE: {format_cedi(float(order_row[5]))}</b>", styles['Heading2']))
+    elements.append(Spacer(1, 0.2 * inch))
+    elements.append(Paragraph(f"<b>PAYABLE TO:</b> {BUSINESS_PROFILE['payable_to']}", styles['Normal']))
+    elements.append(Paragraph(f"<b>STATUS:</b> {order_row[6].upper()}", styles['Normal']))
+    
+    # Footer
+    elements.append(Spacer(1, 1 * inch))
+    elements.append(Paragraph(BUSINESS_PROFILE['footer'], styles['Italic']))
+    
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer, f"invoice_{order_id}.pdf"
+
 # ==================== CLIENT INTELLIGENCE SYSTEM ====================
 
 def get_client_profile(search_term):
@@ -2423,7 +2617,19 @@ Bot learns your spending habits:
 - Alerts you if an expense is 50% higher than your category average
 - Helps catch overspending early!
 
-**STEP 13: EXPLORE MORE**
+**STEP 13: FINANCIAL EXPORTS** (NEW!)
+Get formal PDF reports:
+`/export week`
+- Generates a PDF summary for the week
+- Includes all sales, expenses, and net profit
+
+**STEP 14: AUTOMATIC INVOICES** (NEW!)
+Professional billing:
+`/invoice ORD-123`
+- Generates a branded PDF invoice for the client
+- Ready to send instantly!
+
+**STEP 15: EXPLORE MORE**
 • `balance` - Current profit/loss
 • `today`, `week`, `month` - Reports
 • `categories` - Spending breakdown
@@ -2542,6 +2748,8 @@ When price is unusual, bot asks:
 • `client [name]` - View client history and loyalty tier
 • `+recurring [type] [amount] [freq] [desc]` - Set regular entry
 • `record due` - Post all due recurring transactions
+• `/export [week/month]` - Get PDF financial report
+• `/invoice [ORDER_ID]` - Generate PDF invoice for order
 
 **📊 VIEW FINANCES:**
 • `balance` - Current profit/loss (shows negative if in debt)
@@ -2605,6 +2813,11 @@ def get_examples_message():
 1. `+recurring expense 1000 monthly Office Rent`
 2. `+recurring expense 50 daily Staff Lunch`
 3. `record due`
+
+**EXPORT & INVOICE EXAMPLES:**
+1. `/export month`
+2. `/export today`
+3. `/invoice ORD-123`
 
 **BUDGET EXAMPLES:**
 1. Daily coffee budget:
@@ -3122,6 +3335,25 @@ Confidence: {suggestion['confidence']}%"""
 
     elif text_lower == 'record due':
         return check_recurring_due(user_name, auto_record=True)
+
+    # Financial Exports & Invoicing
+    elif text_lower.startswith('/export'):
+        parts = text.split()
+        period = parts[1].lower() if len(parts) > 1 else 'month'
+        pdf_buffer, filename = generate_financial_report_pdf(period)
+        if pdf_buffer:
+            return {"type": "document", "buffer": pdf_buffer, "filename": filename}
+        return filename # error message
+
+    elif text_lower.startswith('/invoice'):
+        parts = text.split()
+        if len(parts) < 2:
+            return "❌ Use: `/invoice ORDER_ID`"
+        order_id = parts[1].upper()
+        pdf_buffer, filename = generate_invoice_pdf(order_id)
+        if pdf_buffer:
+            return {"type": "document", "buffer": pdf_buffer, "filename": filename}
+        return filename # error message
 
     # ==================== ORIGINAL TRANSACTION COMMANDS ====================
     

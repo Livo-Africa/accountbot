@@ -23,6 +23,39 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Failed to send message: {e}")
 
+def send_telegram_document(chat_id, pdf_buffer, filename):
+    """Sends a document back to Telegram."""
+    url = f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument'
+    
+    # Multipart/form-data boundary
+    boundary = '----TelegramBoundary'
+    
+    parts = []
+    # chat_id field
+    parts.append(f'--{boundary}')
+    parts.append('Content-Disposition: form-data; name="chat_id"')
+    parts.append('')
+    parts.append(str(chat_id))
+    
+    # document field
+    parts.append(f'--{boundary}')
+    parts.append(f'Content-Disposition: form-data; name="document"; filename="{filename}"')
+    parts.append('Content-Type: application/pdf')
+    parts.append('')
+    parts.append(pdf_buffer.read())
+    
+    parts.append(f'--{boundary}--')
+    parts.append('')
+    
+    body = b'\r\n'.join(p if isinstance(p, bytes) else p.encode('utf-8') for p in parts)
+    
+    req = urllib.request.Request(url, data=body,
+                                 headers={'Content-Type': f'multipart/form-data; boundary={boundary}'})
+    try:
+        urllib.request.urlopen(req)
+    except Exception as e:
+        print(f"Failed to send document: {e}")
+
 def clean_message_text(text):
     """Clean message text by removing bot mentions."""
     if not text or not BOT_USERNAME:
@@ -71,7 +104,10 @@ def webhook():
             
             # Only send response if the engine returned something meaningful
             if bot_reply:
-                send_telegram_message(chat_id, bot_reply)
+                if isinstance(bot_reply, dict) and bot_reply.get('type') == 'document':
+                    send_telegram_document(chat_id, bot_reply['buffer'], bot_reply['filename'])
+                else:
+                    send_telegram_message(chat_id, bot_reply)
             elif chat_type == 'private':
                 # In private chats, always respond
                 send_telegram_message(chat_id, "🤔 I'm here to help! Try `tutorial` to get started.")
