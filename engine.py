@@ -74,6 +74,15 @@ def find_column_index(headers, column_name):
     except ValueError:
         return -1
 
+def normalize_phone_number(phone_str):
+    """Normalize phone number to last 9 digits for matching (+23324... vs 024...)."""
+    if not phone_str:
+        return ""
+    # Remove all non-digits
+    digits = re.sub(r'\D', '', str(phone_str))
+    # Return last 9 digits (standard in Ghana for mobile matching)
+    return digits[-9:] if len(digits) >= 9 else digits
+
 # ==================== INTERACTIVE PRICE CORRECTION SYSTEM ====================
 class CorrectionState:
     """Manages interactive price correction states"""
@@ -1210,8 +1219,16 @@ def handle_order_state(user_input, user_name):
                 worksheet.update_cell(row_idx, 3, name)   # Client Name
                 worksheet.update_cell(row_idx, 4, contact_safe) # Client Contact
                 
+                # Check for loyalty alert now that we have accurate info
+                profile = get_client_profile(contact if contact else name)
+                loyalty_alert = ""
+                if profile:
+                    lines = profile.split('\n')
+                    # format: 💎 CLIENT PROFILE: Name | Loyalty: Tier | Total Spent: ₵X | Total Orders: Y
+                    loyalty_alert = f"\n\n💡 **Returning Client!**\n{lines[1]} | {lines[3]}"
+                
                 del ORDER_STATES[user_name]
-                return f"✅ **Order {order_id} Updated!**\nClient: {name}\nContact: {contact}\n\nType `pending` to see all orders."
+                return f"✅ **Order {order_id} Updated!**\nClient: {name}\nContact: {contact}{loyalty_alert}\n\nType `pending` to see all orders."
             
         except Exception as e:
             return f"❌ Failed to update order info: {str(e)}"
@@ -1767,21 +1784,22 @@ def generate_invoice_pdf(order_id):
 # ==================== CLIENT INTELLIGENCE SYSTEM ====================
 
 def get_client_profile(search_term):
-    """Retrieve history and loyalty status for a client."""
+    """Retrieve history and loyalty status for a client using smart matching (Phone or Name)."""
     if not spreadsheet:
         return None
         
     try:
+        search_term = str(search_term).strip()
+        search_norm = normalize_phone_number(search_term)
+        is_phone_search = len(search_norm) >= 9 and search_term.replace('+', '').isdigit()
+        search_lower = search_term.lower()
+        
         # Search in Orders first (better client data)
         orders_ws = spreadsheet.worksheet('Orders')
         all_orders = orders_ws.get_all_values()
         
-        # Search in Sales (for total spending)
-        sales_ws = spreadsheet.worksheet('Sales')
-        all_sales = sales_ws.get_all_values()
-        
         client_data = {
-            'name': search_term,
+            'name': "",
             'contact': "",
             'total_spent': 0.0,
             'order_count': 0,
@@ -1789,38 +1807,49 @@ def get_client_profile(search_term):
             'last_order': None
         }
         
-        search_lower = search_term.lower()
+        found_matches = []
         
-        # Pull from Orders
+        # 1. Search Orders for matches
         for row in all_orders[1:]:
             if len(row) < 5: continue
             
             c_name = row[2].strip()
-            c_contact = row[3].strip()
+            # Remove leading single quote if present (from our safety fix)
+            c_contact = row[3].strip().lstrip("'")
+            c_contact_norm = normalize_phone_number(c_contact)
             
-            if search_lower in c_name.lower() or search_lower in c_contact.lower():
-                client_data['name'] = c_name
-                client_data['contact'] = c_contact
+            match = False
+            if is_phone_search:
+                if search_norm == c_contact_norm:
+                    match = True
+            else:
+                if search_lower == c_name.lower():
+                    match = True
+                elif len(search_lower) > 3 and search_lower in c_name.lower(): # Partial match only for longer names
+                    match = True
+            
+            if match:
+                if not client_data['name']: client_data['name'] = c_name
+                if not client_data['contact']: client_data['contact'] = c_contact
                 client_data['order_count'] += 1
                 if row[4]: client_data['services'].append(row[4])
                 
                 # Track last order date
                 try: 
-                    o_date = datetime.strptime(row[1], '%Y-%m-%d')
+                    # Date Created is row[1]
+                    o_date_str = row[1].split()[0] # Get YYYY-MM-DD from YYYY-MM-DD HH:MM:SS
+                    o_date = datetime.strptime(o_date_str, '%Y-%m-%d')
                     if not client_data['last_order'] or o_date > client_data['last_order']:
                         client_data['last_order'] = o_date
                 except: pass
-        
-        # Pull from Sales (total spent)
-        for row in all_sales[1:]:
-            if len(row) < 3: continue
-            desc = row[2].lower()
-            if search_lower in desc:
-                try:
-                    client_data['total_spent'] += float(row[1])
-                except: pass
                 
-        if client_data['order_count'] == 0 and client_data['total_spent'] == 0:
+                # Sum spending from Orders Total Amount (row[5])
+                try:
+                    amount = float(row[5])
+                    client_data['total_spent'] += amount
+                except: pass
+        
+        if client_data['order_count'] == 0:
             return None
             
         # Determine loyalty
@@ -1831,7 +1860,7 @@ def get_client_profile(search_term):
         else:
             tier = "🥉 Bronze Client"
             
-        response = f"💎 **CLIENT PROFILE: {client_data['name']}**\n"
+        response = f"💎 **CLIENT PROFILE: {xml_escape(client_data['name'])}**\n"
         response += f"Loyalty: **{tier}**\n"
         response += f"💰 Total Spent: {format_cedi(client_data['total_spent'])}\n"
         response += f"📦 Total Orders: {client_data['order_count']}\n"
@@ -1841,13 +1870,98 @@ def get_client_profile(search_term):
             
         if client_data['services']:
             # Frequent service
-            top_service = max(set(client_data['services']), key=client_data['services'].count)
-            response += f"⭐ Top Service: {top_service}\n"
+            valid_services = [s for s in client_data['services'] if s]
+            if valid_services:
+                top_service = max(set(valid_services), key=valid_services.count)
+                response += f"⭐ Top Service: {xml_escape(top_service)}\n"
             
         return response
         
-    except Exception:
+    except Exception as e:
+        print(f"Debugger: get_client_profile failed: {e}")
         return None
+
+def list_clients(top_loyal=False, limit=20):
+    """List clients, either by loyalty rank or recent activity."""
+    if not spreadsheet:
+        return "❌ Not connected to database."
+        
+    try:
+        orders_ws = spreadsheet.worksheet('Orders')
+        all_orders = orders_ws.get_all_values()
+        
+        if not all_orders or len(all_orders) < 2:
+            return "📭 No clients found yet."
+            
+        # Group by unique client (Primary Key: Normalized Phone, fallback: Name)
+        client_registry = {}
+        
+        for row in all_orders[1:]:
+            if len(row) < 5: continue
+            
+            name = row[2].strip()
+            contact = row[3].strip().lstrip("'")
+            contact_norm = normalize_phone_number(contact)
+            
+            # Key for unique identification
+            key = contact_norm if contact_norm else name.lower()
+            
+            if key not in client_registry:
+                client_registry[key] = {
+                    'name': name,
+                    'contact': contact,
+                    'spending': 0.0,
+                    'orders': 0,
+                    'last_date': datetime.min
+                }
+            
+            reg = client_registry[key]
+            reg['orders'] += 1
+            try:
+                reg['spending'] += float(row[5])
+            except: pass
+            
+            try:
+                o_date_str = row[1].split()[0]
+                o_date = datetime.strptime(o_date_str, '%Y-%m-%d')
+                if o_date > reg['last_date']:
+                    reg['last_date'] = o_date
+            except: pass
+            
+        # Convert to list and calculate tiers
+        client_list = list(client_registry.values())
+        for c in client_list:
+            if c['orders'] >= 6: c['tier'] = "🥇 Gold"
+            elif c['orders'] >= 3: c['tier'] = "🥈 Silver"
+            else: c['tier'] = "🥉 Bronze"
+            
+        if top_loyal:
+            # Sort by orders, then spending
+            client_list.sort(key=lambda x: (x['orders'], x['spending']), reverse=True)
+            title = "🏆 **TOP LOYAL CLIENTS**"
+            count = min(len(client_list), 10)
+        else:
+            # Sort by recency
+            client_list.sort(key=lambda x: x['last_date'], reverse=True)
+            title = "👥 **RECENT CLIENTS**"
+            count = min(len(client_list), limit)
+            
+        if not client_list:
+            return "📭 No unique clients identified."
+            
+        response = f"{title}\n"
+        response += "Rank | Client | Tier | Total\n"
+        response += "---|---|---|---\n"
+        
+        for i, c in enumerate(client_list[:count], 1):
+            last_seen = c['last_date'].strftime('%b %d') if c['last_date'] != datetime.min else "-"
+            response += f"{i}. **{c['name']}** | {c['tier']} | {format_cedi(c['spending'])}\n"
+            response += f"   *Last: {last_seen} | Orders: {c['orders']}*\n\n"
+            
+        return response
+        
+    except Exception as e:
+        return f"❌ Error retrieving client list: {str(e)}"
 
 # ==================== ENHANCED TRANSACTION FUNCTIONS (WITH ALL NEW FEATURES) ====================
 def record_transaction(trans_type, amount, description="", user_name="User"):
@@ -1952,15 +2066,20 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
         
         # Client Intelligence: Check for returning client on sales
         client_alert = ""
-        if trans_type.lower() == 'sale':
-            # Try to extract name from description (look for common patterns or first word)
-            potential_name = clean_description.split()[0] if clean_description else ""
-            if len(potential_name) > 2: # Avoid very short names
-                profile = get_client_profile(potential_name)
+        # Only check if description strongly suggests a name or number (e.g. "@Kofi" or starts with digit)
+        if trans_type.lower() == 'sale' and clean_description:
+            words = clean_description.split()
+            first_word = words[0] if words else ""
+            
+            # Smart check: Is the first word likely a client identifier?
+            is_likely_id = first_word.startswith('@') or (len(first_word) >= 9 and first_word.isdigit())
+            
+            if is_likely_id:
+                search_term = first_word.lstrip('@')
+                profile = get_client_profile(search_term)
                 if profile:
-                    # Include a concise alert
                     lines = profile.split('\n')
-                    client_alert = f"\n💡 **Returning Client Detected!**\n{lines[1]} | {lines[3]}"
+                    client_alert = f"\n💡 **Returning Client!**\n{lines[1]} | {lines[3]}"
 
         # Prepare confirmation message
         response = f"✅ Recorded {trans_type} of {format_cedi(amount)}"
@@ -2770,6 +2889,8 @@ When price is unusual, bot asks:
 • `+goal [amount]` - Set a profit goal for the current month
 • `goals` - Check progress toward your goal
 • `client [name]` - View client history and loyalty tier
+• `clients` - View Top 10 Loyal VIP clients
+• `list clients` - View last 20 recent clients
 • `+recurring [type] [amount] [freq] [desc]` - Set regular entry
 • `record due` - Post all due recurring transactions
 • `/export [week/month]` - Get PDF financial report
@@ -2832,6 +2953,11 @@ def get_examples_message():
 **CLIENT EXAMPLES:**
 1. `client Kofi`
 2. `client 0244123456`
+
+**CLIENT LIST EXAMPLES:**
+1. `clients` (Top 10 VIPs)
+2. `list clients` (Last 20 recent)
+3. `client Ama` (Deep profile)
 
 **RECURRING EXAMPLES:**
 1. `+recurring expense 1000 monthly Office Rent`
@@ -3337,6 +3463,12 @@ Confidence: {suggestion['confidence']}%"""
         return progress if progress else "🎯 No active goals for this month. Set one with `+goal [amount]`!"
 
     # Client Intelligence
+    elif text_lower == 'clients':
+        return list_clients(top_loyal=True)
+
+    elif text_lower == 'list clients':
+        return list_clients(top_loyal=False, limit=20)
+
     elif text_lower.startswith('client '):
         name = text[7:].strip()
         profile = get_client_profile(name)
