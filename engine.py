@@ -1025,11 +1025,14 @@ def record_order(amount, description, user_name, linked_sale_id="", client_name=
         # Payment status: If from a sale, it's 'Paid'
         payment_status = "Paid" if linked_sale_id else "Unpaid"
         
+        # Prevent '+' from being treated as a formula in Sheets
+        contact_safe = f"'{client_contact}" if client_contact.startswith('+') else client_contact
+        
         row = [
             order_id,
             datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             client_name,
-            client_contact,
+            contact_safe,
             description,
             float(amount),
             "Pending",          # Initial Status
@@ -1202,8 +1205,10 @@ def handle_order_state(user_input, user_name):
                     break
             
             if row_idx != -1:
+                # Prevent '+' from being treated as a formula in Sheets
+                contact_safe = f"'{contact}" if contact.startswith('+') else contact
                 worksheet.update_cell(row_idx, 3, name)   # Client Name
-                worksheet.update_cell(row_idx, 4, contact) # Client Contact
+                worksheet.update_cell(row_idx, 4, contact_safe) # Client Contact
                 
                 del ORDER_STATES[user_name]
                 return f"✅ **Order {order_id} Updated!**\nClient: {name}\nContact: {contact}\n\nType `pending` to see all orders."
