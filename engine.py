@@ -10,6 +10,7 @@ import requests
 from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from collections import defaultdict
+from xml.sax.saxutils import escape as xml_escape
 
 # ReportLab imports
 from reportlab.lib import colors
@@ -1588,157 +1589,175 @@ def generate_financial_report_pdf(period='month'):
     if not spreadsheet:
         return None, "❌ Not connected to database."
         
-    start_date, end_date = get_date_range(period)
-    all_trans = []
-    for sheet in ['Sales', 'Expenses', 'Income']:
-        all_trans.extend(get_transactions(sheet, start_date=start_date, end_date=end_date))
-    
-    if not all_trans:
-        return None, "📭 No transactions found for this period."
+    try:
+        start_date, end_date = get_date_range(period)
+        all_trans = []
+        for sheet in ['Sales', 'Expenses', 'Income']:
+            all_trans.extend(get_transactions(sheet, start_date=start_date, end_date=end_date))
         
-    all_trans.sort(key=lambda x: x['date'])
-    
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    elements = []
-    styles = getSampleStyleSheet()
-    
-    # Header
-    logo = get_logo_image(BUSINESS_PROFILE['logo_url'])
-    if logo:
-        elements.append(logo)
-        elements.append(Spacer(1, 0.1 * inch))
+        if not all_trans:
+            return None, "📭 No transactions found for this period."
+            
+        all_trans.sort(key=lambda x: x['date'])
         
-    elements.append(Paragraph(f"<b>{BUSINESS_PROFILE['name']}</b>", styles['Title']))
-    elements.append(Paragraph(f"Financial Report: {period.upper()}LY", styles['Heading2']))
-    elements.append(Paragraph(f"Period: {start_date} to {end_date}", styles['Normal']))
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    # Table Data
-    data = [['Date', 'Type', 'Description', 'Category', 'Amount']]
-    total_income = 0
-    total_expense = 0
-    
-    for t in all_trans:
-        is_income = t['type'] in ['sale', 'income']
-        amount = t['amount']
-        if is_income: total_income += amount
-        else: total_expense += amount
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        elements = []
+        styles = getSampleStyleSheet()
         
-        data.append([
-            t['date'],
-            t['type'].upper(),
-            t['description'][:30],
-            t['category'] or "-",
-            format_cedi(amount)
-        ])
+        # Header
+        logo = get_logo_image(BUSINESS_PROFILE['logo_url'])
+        if logo:
+            elements.append(logo)
+            elements.append(Spacer(1, 0.1 * inch))
+            
+        elements.append(Paragraph(f"<b>{xml_escape(BUSINESS_PROFILE['name'])}</b>", styles['Title']))
+        elements.append(Paragraph(f"Financial Report: {period.upper()}LY", styles['Heading2']))
+        elements.append(Paragraph(f"Period: {xml_escape(start_date)} to {xml_escape(end_date)}", styles['Normal']))
+        elements.append(Spacer(1, 0.2 * inch))
         
-    # Table Styling
-    t = Table(data, hAlign='LEFT')
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black)
-    ]))
-    elements.append(t)
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # Summary
-    elements.append(Paragraph(f"<b>Total Income:</b> {format_cedi(total_income)}", styles['Normal']))
-    elements.append(Paragraph(f"<b>Total Expense:</b> {format_cedi(total_expense)}", styles['Normal']))
-    net = total_income - total_expense
-    elements.append(Paragraph(f"<b>NET PROFIT:</b> {format_cedi(net)}", styles['Heading3']))
-    
-    # Footer
-    elements.append(Spacer(1, 0.5 * inch))
-    elements.append(Paragraph(BUSINESS_PROFILE['footer'], styles['Italic']))
-    
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer, f"{period}_report_{start_date}.pdf"
+        # Table Data
+        data = [['Date', 'Type', 'Description', 'Category', 'Amount']]
+        total_income = 0
+        total_expense = 0
+        
+        for t in all_trans:
+            is_income = t['type'] in ['sale', 'income']
+            amount = t['amount']
+            if is_income: total_income += amount
+            else: total_expense += amount
+            
+            # Escape strings for Table (though Table handles them better, it's good practice)
+            data.append([
+                xml_escape(t['date']),
+                xml_escape(t['type'].upper()),
+                xml_escape(t['description'][:30]),
+                xml_escape(t['category'] or "-"),
+                format_cedi(amount)
+            ])
+            
+        # Table Styling
+        t = Table(data, hAlign='LEFT')
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 0.3 * inch))
+        
+        # Summary
+        elements.append(Paragraph(f"<b>Total Income:</b> {format_cedi(total_income)}", styles['Normal']))
+        elements.append(Paragraph(f"<b>Total Expense:</b> {format_cedi(total_expense)}", styles['Normal']))
+        net = total_income - total_expense
+        elements.append(Paragraph(f"<b>NET PROFIT:</b> {format_cedi(net)}", styles['Heading3']))
+        
+        # Footer
+        elements.append(Spacer(1, 0.5 * inch))
+        elements.append(Paragraph(xml_escape(BUSINESS_PROFILE['footer']), styles['Italic']))
+        
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer, f"{period}_report_{start_date}.pdf"
+    except Exception as e:
+        return None, f"❌ Report generation failed: {str(e)}"
 
 def generate_invoice_pdf(order_id):
     """Generate a professional PDF invoice for a specific order."""
     if not spreadsheet:
         return None, "❌ Not connected to database."
         
-    # Find the order
-    worksheet = spreadsheet.worksheet('Orders')
-    all_rows = worksheet.get_all_values()
-    order_row = None
-    for row in all_rows[1:]:
-        if len(row) > 0 and row[0] == order_id:
-            order_row = row
-            break
+    try:
+        # Find the order
+        worksheet = spreadsheet.worksheet('Orders')
+        all_rows = worksheet.get_all_values()
+        order_row = None
+        for row in all_rows[1:]:
+            if len(row) > 0 and row[0] == order_id:
+                # Ensure row has enough columns (at least 7 for basic info)
+                order_row = row + [""] * (11 - len(row))
+                break
+                
+        if not order_row:
+            return None, f"❌ Order {order_id} not found."
             
-    if not order_row:
-        return None, f"❌ Order {order_id} not found."
+        # Order Details: ID[0], Date[1], Name[2], Contact[3], Service[4], Amount[5], Status[6]
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        elements = []
+        styles = getSampleStyleSheet()
         
-    # Order Details: ID[0], Date[1], Name[2], Contact[3], Service[4], Amount[5], Status[6]
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    elements = []
-    styles = getSampleStyleSheet()
-    
-    # Custom styles
-    header_style = ParagraphStyle('HeaderStyle', parent=styles['Normal'], fontSize=10, leading=12)
-    
-    # Logo & Company Details
-    logo = get_logo_image(BUSINESS_PROFILE['logo_url'])
-    if logo:
-        elements.append(logo)
+        # Custom styles
+        header_style = ParagraphStyle('HeaderStyle', parent=styles['Normal'], fontSize=10, leading=12)
         
-    elements.append(Paragraph(f"<b>{BUSINESS_PROFILE['name']}</b>", styles['Title']))
-    elements.append(Paragraph(f"{BUSINESS_PROFILE['address']}", header_style))
-    elements.append(Paragraph(f"Phone: {BUSINESS_PROFILE['phone']}", header_style))
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # Invoice Title & Client Info
-    elements.append(Paragraph(f"<b>INVOICE</b>", styles['Heading1']))
-    elements.append(Paragraph(f"<b>Invoice #:</b> {order_id}", styles['Normal']))
-    elements.append(Paragraph(f"<b>Date:</b> {order_row[1]}", styles['Normal']))
-    elements.append(Spacer(1, 0.2 * inch))
-    
-    elements.append(Paragraph(f"<b>BILL TO:</b>", styles['Heading4']))
-    elements.append(Paragraph(f"{order_row[2]}", styles['Normal']))
-    elements.append(Paragraph(f"{order_row[3]}", styles['Normal']))
-    elements.append(Spacer(1, 0.3 * inch))
-    
-    # Items Table
-    data = [
-        ['Description', 'Quantity', 'Unit Price', 'Total'],
-        [order_row[4], '1', format_cedi(float(order_row[5])), format_cedi(float(order_row[5]))]
-    ]
-    
-    t = Table(data, colWidths=[3 * inch, 1 * inch, 1.5 * inch, 1.5 * inch])
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-    ]))
-    elements.append(t)
-    elements.append(Spacer(1, 0.4 * inch))
-    
-    # Total & Payment Instructions
-    elements.append(Paragraph(f"<b>TOTAL DUE: {format_cedi(float(order_row[5]))}</b>", styles['Heading2']))
-    elements.append(Spacer(1, 0.2 * inch))
-    elements.append(Paragraph(f"<b>PAYABLE TO:</b> {BUSINESS_PROFILE['payable_to']}", styles['Normal']))
-    elements.append(Paragraph(f"<b>STATUS:</b> {order_row[6].upper()}", styles['Normal']))
-    
-    # Footer
-    elements.append(Spacer(1, 1 * inch))
-    elements.append(Paragraph(BUSINESS_PROFILE['footer'], styles['Italic']))
-    
-    doc.build(elements)
-    buffer.seek(0)
-    return buffer, f"invoice_{order_id}.pdf"
+        # Logo & Company Details
+        logo = get_logo_image(BUSINESS_PROFILE['logo_url'])
+        if logo:
+            elements.append(logo)
+            
+        elements.append(Paragraph(f"<b>{xml_escape(BUSINESS_PROFILE['name'])}</b>", styles['Title']))
+        elements.append(Paragraph(f"{xml_escape(BUSINESS_PROFILE['address'])}", header_style))
+        elements.append(Paragraph(f"Phone: {xml_escape(BUSINESS_PROFILE['phone'])}", header_style))
+        elements.append(Spacer(1, 0.3 * inch))
+        
+        # Invoice Title & Client Info
+        elements.append(Paragraph(f"<b>INVOICE</b>", styles['Heading1']))
+        elements.append(Paragraph(f"<b>Invoice #:</b> {xml_escape(order_id)}", styles['Normal']))
+        elements.append(Paragraph(f"<b>Date:</b> {xml_escape(order_row[1])}", styles['Normal']))
+        elements.append(Spacer(1, 0.2 * inch))
+        
+        elements.append(Paragraph(f"<b>BILL TO:</b>", styles['Heading4']))
+        # Safely get name and contact, escaping for ReportLab Paragraph
+        client_name = xml_escape(order_row[2]) if order_row[2] else "Walk-in Client"
+        client_contact = xml_escape(order_row[3]) if order_row[3] else "No contact provided"
+        
+        elements.append(Paragraph(client_name, styles['Normal']))
+        elements.append(Paragraph(client_contact, styles['Normal']))
+        elements.append(Spacer(1, 0.3 * inch))
+        
+        # Items Table
+        try:
+            amt_val = float(order_row[5])
+        except (ValueError, TypeError, IndexError):
+            amt_val = 0.0
+            
+        data = [
+            ['Description', 'Quantity', 'Unit Price', 'Total'],
+            [xml_escape(order_row[4]), '1', format_cedi(amt_val), format_cedi(amt_val)]
+        ]
+        
+        t = Table(data, colWidths=[3 * inch, 1 * inch, 1.5 * inch, 1.5 * inch])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        elements.append(t)
+        elements.append(Spacer(1, 0.4 * inch))
+        
+        # Total & Payment Instructions
+        elements.append(Paragraph(f"<b>TOTAL DUE: {format_cedi(amt_val)}</b>", styles['Heading2']))
+        elements.append(Spacer(1, 0.2 * inch))
+        elements.append(Paragraph(f"<b>PAYABLE TO:</b> {xml_escape(BUSINESS_PROFILE['payable_to'])}", styles['Normal']))
+        status_text = order_row[6].upper() if order_row[6] else "PENDING"
+        elements.append(Paragraph(f"<b>STATUS:</b> {xml_escape(status_text)}", styles['Normal']))
+        
+        # Footer
+        elements.append(Spacer(1, 1 * inch))
+        elements.append(Paragraph(xml_escape(BUSINESS_PROFILE['footer']), styles['Italic']))
+        
+        doc.build(elements)
+        buffer.seek(0)
+        return buffer, f"invoice_{order_id}.pdf"
+    except Exception as e:
+        return None, f"❌ Invoice generation failed: {str(e)}"
 
 # ==================== CLIENT INTELLIGENCE SYSTEM ====================
 
