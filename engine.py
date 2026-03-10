@@ -12,6 +12,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from xml.sax.saxutils import escape as xml_escape
 
+from conversation import conversation_agent, nlp_processor
+
 # ReportLab imports
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -45,6 +47,51 @@ spreadsheet = None
 
 # Global state for interactive flows
 ORDER_STATES = {}
+
+# ==================== AI MEMORY (USER CONTEXT) ====================
+def ensure_user_context_sheet():
+    """Ensure the UserContext sheet exists for AI memory."""
+    if not spreadsheet:
+        return
+    try:
+        spreadsheet.worksheet('UserContext')
+    except gspread.exceptions.WorksheetNotFound:
+        # Create it with headers
+        sheet = spreadsheet.add_worksheet(title='UserContext', rows=1000, cols=5)
+        sheet.append_row(['UserID', 'MemoryKey', 'MemoryValue', 'Timestamp', 'IsActive'])
+
+def get_user_context_memory(user_name):
+    """Fetch all active long-term memories for a user as a string."""
+    if not spreadsheet:
+        return ""
+    try:
+        sheet = spreadsheet.worksheet('UserContext')
+        all_rows = sheet.get_all_values()
+        if len(all_rows) <= 1:
+            return ""
+            
+        memories = []
+        for row in all_rows[1:]:
+            if len(row) >= 5 and row[0] == user_name and row[4] == 'TRUE':
+                memories.append(f"- {row[2]}")
+                
+        return "\n".join(memories)
+    except Exception as e:
+        print(f"Error fetching user context: {e}")
+        return ""
+
+def save_user_context_memory(user_name, memory_value):
+    """Save a new long-term memory learned by the AI."""
+    if not spreadsheet:
+        return
+    try:
+        sheet = spreadsheet.worksheet('UserContext')
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # MemoryKey is just a hash or generic string for now
+        memory_key = f"mem_{int(time.time())}"
+        sheet.append_row([user_name, memory_key, memory_value, timestamp, 'TRUE'])
+    except Exception as e:
+        print(f"Error saving user context: {e}")
 
 # ==================== HELPER FUNCTIONS ====================
 def generate_transaction_id(trans_type):
@@ -2115,7 +2162,7 @@ def record_transaction(trans_type, amount, description="", user_name="User"):
             response += "\n4. Update price range?"
             response += "\n5. Ignore (it's correct)"
             response += "\n\n**Reply with numbers** (e.g., '1' or '1,4')"
-            
+
             # Store all state IDs for this transaction
             state_ids = [c['state_id'] for c in correction_states]
             correction_state.states[transaction_id] = {
@@ -3036,7 +3083,64 @@ def process_command(user_input, user_name="User"):
         if correction_response:
             return correction_response
 
-    # ==================== AUTO-SUGGEST & QUICK RECORD ====================
+    # ==================== MAIN COMMAND PROCESSOR (SMART AI INTERCEPT) ====================
+    # Before we do any regex matching or exact command checks, let Gemini analyze the intent.
+    
+    # 1. Fetch AI Context/Memory
+    user_context = get_user_context_memory(user_name)
+    
+    # 2. Try Gemini
+    gemini_result = nlp_processor.process_message(text, user_name, user_context)
+    
+    # 3. IF GEMINI SUCCEEDED (no error flag), use its structured output
+    if gemini_result and "error" not in gemini_result:
+        intent = gemini_result.get("intent", "unknown")
+        amount = gemini_result.get("amount")
+        desc = gemini_result.get("description", "")
+        conversational_response = gemini_result.get("conversational_response", "")
+        memory_to_save = gemini_result.get("memory_to_save")
+        
+        # Save memory if requested
+        if intent == "preference_update" and memory_to_save:
+            save_user_context_memory(user_name, memory_to_save)
+            return conversational_response
+
+        # Route to appropriate engine function based on Gemini's intent
+        if intent in ["record_expense", "record_sale", "record_income"]:
+            trans_type = intent.replace("record_", "")
+            
+            # Use Gemini's confident answer, or ask for details if missing
+            if amount is not None and desc:
+                # Tell engine to record it
+                engine_response = record_transaction(trans_type, amount, desc, user_name)
+                # Combine conversational flair with engine's technical success msg
+                return f"{conversational_response}\n\n{engine_response}"
+            else:
+                return f"{conversational_response}\n(I need both the amount and a short description! Example: /expense 50 for lunch)"
+                
+        elif intent == "check_balance":
+            return f"{conversational_response}\n\n{get_balance()}"
+            
+        elif intent == "check_today":
+            return f"{conversational_response}\n\n{get_today_summary()}"
+            
+        elif intent == "check_week":
+            return f"{conversational_response}\n\n{get_period_summary('week')}"
+            
+        elif intent == "check_month":
+            return f"{conversational_response}\n\n{get_period_summary('month')}"
+            
+        elif intent in ["greeting", "compliment", "thanks", "general_chat"]:
+            return conversational_response
+            
+        elif intent == "help":
+            return f"{conversational_response}\n\n{get_help_message()}"
+            
+        # If intent is unknown, we fall through to the old regex engine below!
+    
+    # ==================== GRACEFUL FALLBACK (ORIGINAL REGEX LOGIC) ====================
+    # If we got here, Gemini failed (api_failed) OR Gemini returned 'unknown' intent.
+    # The bot will continue checking legacy command prefixes.
     
     # Quick record for trained items: "birthday basic"
     if not any(text_lower.startswith(prefix) for prefix in ['+', '/', 'balance', 'today', 'week', 'month', 'help', 'tutorial']):

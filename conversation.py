@@ -1,11 +1,12 @@
 # conversation.py - Conversational Intelligence Module
 import re
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
+from gemini import process_with_gemini
 
 class ConversationalAgent:
-    """Makes the bot conversational and intelligent"""
+    """Makes the bot conversational and intelligent with optional AI"""
     
     def __init__(self):
         self.greetings = {
@@ -42,7 +43,7 @@ class ConversationalAgent:
         self.user_memory = {}
         
     def detect_intent(self, message: str) -> str:
-        """Detect the user's intent from their message."""
+        """Detect the user's intent from their message (Fallback Logic)."""
         message_lower = message.lower().strip()
         
         # Greetings
@@ -155,7 +156,7 @@ class ConversationalAgent:
         return ""
     
     def extract_transaction_details(self, message: str):
-        """Extract transaction details from natural language."""
+        """Extract transaction details from natural language (Fallback Logic)."""
         patterns = [
             # "spent 100 on lunch"
             (r'(?:spent|paid|bought|purchased)\s+(\d+(?:\.\d{1,2})?)\s+(?:on|for)\s+(.+)', 'expense'),
@@ -302,10 +303,11 @@ class ConversationalAgent:
         return None
 
 
-class NaturalLanguageProcessor:
-    """Process natural language input into commands."""
+class SmartProcessor:
+    """Delegates to Gemini AI first; gracefully falls back to Regex if API fails."""
     
     def __init__(self):
+        # We need the old parser for fallback command routing
         self.command_patterns = {
             'balance': [
                 r'how.*much.*(?:money|balance|profit)',
@@ -348,9 +350,18 @@ class NaturalLanguageProcessor:
                 r'what.*options'
             ]
         }
+        
+    def process_message(self, message: str, user_name: str, saved_memory: str = "") -> dict:
+        """
+        Attempts to process the message via Gemini.
+        Returns a dict. If API fails, dict contains {"error": "api_failed"}.
+        """
+        # Try Gemini API first
+        gemini_result = process_with_gemini(message, user_name, saved_memory)
+        return gemini_result
     
-    def parse_to_command(self, message: str):
-        """Parse natural language to a command."""
+    def fallback_parse_to_command(self, message: str):
+        """Parse natural language to a command (Fallback)."""
         message_lower = message.lower().strip()
         
         # Check for transaction patterns first
@@ -368,7 +379,6 @@ class NaturalLanguageProcessor:
         
         return None
 
-
 # Global instances
 conversation_agent = ConversationalAgent()
-nlp_processor = NaturalLanguageProcessor()
+nlp_processor = SmartProcessor()
