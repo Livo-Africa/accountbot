@@ -3121,6 +3121,7 @@ def process_command(user_input, user_name="User"):
         intent = gemini_result.get("intent", "unknown")
         amount = gemini_result.get("amount")
         desc = gemini_result.get("description", "")
+        target = gemini_result.get("target", "")
         conversational_response = gemini_result.get("conversational_response", "")
         memory_to_save = gemini_result.get("memory_to_save")
         
@@ -3135,12 +3136,10 @@ def process_command(user_input, user_name="User"):
             
             # Use Gemini's confident answer, or ask for details if missing
             if amount is not None and desc:
-                # Tell engine to record it
                 engine_response = record_transaction(trans_type, amount, desc, user_name)
-                # Combine conversational flair with engine's technical success msg
                 return f"{conversational_response}\n\n{engine_response}"
             else:
-                return f"{conversational_response}\n(I need both the amount and a short description! Example: /expense 50 for lunch)"
+                return f"{conversational_response}\n(I need both the amount and a short description! Example: spent 50 on lunch)"
                 
         elif intent == "check_balance":
             return f"{conversational_response}\n\n{get_balance()}"
@@ -3153,6 +3152,91 @@ def process_command(user_input, user_name="User"):
             
         elif intent == "check_month":
             return f"{conversational_response}\n\n{get_period_summary('month')}"
+            
+        elif intent == "check_categories":
+            return f"{conversational_response}\n\n{get_categories_report()}"
+            
+        elif intent == "list_transactions":
+            return f"{conversational_response}\n\n{list_user_transactions(user_name, limit=10)}"
+            
+        elif intent == "delete_last":
+            return f"{conversational_response}\n\n{delete_last_transaction(user_name)}"
+            
+        elif intent == "delete_by_id":
+            if target:
+                # Clean the target to extract just the ID
+                clean_id = target.upper().replace("ID:", "").strip()
+                return f"{conversational_response}\n\n{delete_transaction_by_id(clean_id, user_name)}"
+            else:
+                return f"{conversational_response}\n\n{list_user_transactions(user_name, limit=5)}\n\n💡 Tell me the ID from above, like: delete EXP-ABC123"
+                
+        elif intent == "check_orders":
+            return f"{conversational_response}\n\n{get_orders(limit=10)}"
+            
+        elif intent == "check_pending":
+            return f"{conversational_response}\n\n{get_orders(limit=20, pending_only=True)}"
+            
+        elif intent == "check_reminders":
+            result = get_order_reminders()
+            return f"{conversational_response}\n\n{result}" if result else f"{conversational_response}\n\n✅ No pending reminders!"
+            
+        elif intent == "check_insights":
+            return f"{conversational_response}\n\n{get_service_insights()}"
+            
+        elif intent == "check_goals":
+            progress = get_goal_progress("profit", user_name)
+            return f"{conversational_response}\n\n{progress}" if progress else f"{conversational_response}\n\n🎯 No active goals. Set one with `+goal [amount]`!"
+            
+        elif intent == "check_budgets":
+            # Reuse the budgets display logic
+            try:
+                alerts = check_budget_alerts(user_name)
+                worksheet = spreadsheet.worksheet('Budgets')
+                all_rows = worksheet.get_all_values()
+                
+                if len(all_rows) <= 1:
+                    return f"{conversational_response}\n\n📭 No budgets set. Use +budget to create one."
+                
+                response = f"{conversational_response}\n\n💰 **YOUR BUDGETS:**\n\n"
+                
+                for row in all_rows[1:]:
+                    if row and len(row) > 8 and row[8].strip() == user_name:
+                        try:
+                            category_item = row[0]
+                            budget_amount = float(row[2]) if len(row) > 2 and row[2] else 0
+                            period = row[3] if len(row) > 3 else ""
+                            current_spent = float(row[4]) if len(row) > 4 and row[4] else 0
+                            remaining = float(row[5]) if len(row) > 5 else budget_amount
+                            status = row[10] if len(row) > 10 else "active"
+                            
+                            if status.lower() != 'active':
+                                continue
+                            
+                            percent_spent = (current_spent / budget_amount * 100) if budget_amount > 0 else 0
+                            emoji = "❌" if percent_spent >= 100 else "⚠️" if percent_spent >= 90 else "📊" if percent_spent >= 50 else "✅"
+                            
+                            response += f"{emoji} **{category_item}**: {format_cedi(current_spent)} / {format_cedi(budget_amount)} {period}\n"
+                            response += f"   Remaining: {format_cedi(remaining)} | {percent_spent:.1f}% spent\n\n"
+                        except (ValueError, IndexError):
+                            continue
+                
+                return response
+            except Exception:
+                return f"{conversational_response}\n\n📭 No budgets found."
+                
+        elif intent == "check_clients":
+            if target:
+                profile = get_client_profile(target)
+                return f"{conversational_response}\n\n{profile}" if profile else f"{conversational_response}\n\n🔍 No history found for '{target}'."
+            else:
+                return f"{conversational_response}\n\n{list_clients(top_loyal=True)}"
+                
+        elif intent == "export_report":
+            period = target if target in ['today', 'week', 'month'] else 'month'
+            pdf_buffer, filename = generate_financial_report_pdf(period)
+            if pdf_buffer:
+                return {"type": "document", "buffer": pdf_buffer, "filename": filename}
+            return f"{conversational_response}\n\n{filename}"
             
         elif intent in ["greeting", "compliment", "thanks", "general_chat"]:
             return conversational_response
