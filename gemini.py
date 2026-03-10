@@ -11,26 +11,20 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # Configuration for the model
-    generation_config = {
-        "temperature": 0.2, # Low temperature for more deterministic JSON output
-        "top_p": 0.95,
-        "top_k": 40,
-        "max_output_tokens": 8192,
-        "response_mime_type": "application/json",
-    }
-    
-    # We use 1.5 flash for speed and free tier limits
-    try:
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config=generation_config,
-        )
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini model: {e}")
-        model = None
-else:
-    model = None
+# Configuration for the model
+generation_config = {
+    "temperature": 0.2, # Low temperature for more deterministic JSON output
+    "top_p": 0.95,
+    "top_k": 40,
+    "max_output_tokens": 8192,
+}
+
+# Ordered list of models to try if the primary one is 404/unavailable in the user's GCP project
+FALLBACK_MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-pro"
+]
 
 # System prompt to guide Gemini's behavior and enforce JSON schema
 SYSTEM_PROMPT = """You are a highly intelligent financial assistant Telegram bot. Your primary job is to understand user messages, figure out what they want to do, and extract any relevant data.
@@ -75,8 +69,8 @@ def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
     Process natural language using Gemini. 
     Gracefully falls back if the API fails, is not configured, or hits limits.
     """
-    if not model:
-        # Graceful fallback: API key missing or model failed to load
+    if not GEMINI_API_KEY:
+        # Graceful fallback: API key missing
         return {"error": "api_failed"}
         
     try:
@@ -84,8 +78,31 @@ def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
         prompt = SYSTEM_PROMPT % (context if context else "No special preferences saved yet.")
         prompt += f"\n\nUser ({user_name}): {text}\nOutput:"
 
-        # Call Gemini (Generative AI)
-        response = model.generate_content(prompt)
+        response = None
+        last_error = None
+        
+        # Try each model in the fallback list until one works
+        for model_name in FALLBACK_MODELS:
+            try:
+                model = genai.GenerativeModel(
+                    model_name=model_name,
+                    generation_config=generation_config,
+                )
+                response = model.generate_content(prompt)
+                break # Success!
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                # If it's a 404/Not Found or 403, we try the next model.
+                if "404" in error_str or "not found" in error_str or "permission" in error_str:
+                    logger.warning(f"Model {model_name} failed ({e}), trying next...")
+                    continue
+                else:
+                    # If it's a rate limit (429) or other API issue, usually all models will fail anyway
+                    break
+                    
+        if not response:
+            raise last_error if last_error else Exception("All fallback models failed")
         
         # Clean response text from markdown block formatting if present
         text_response = response.text.strip()
