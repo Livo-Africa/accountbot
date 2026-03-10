@@ -1,34 +1,30 @@
 import os
 import json
 import logging
-import google.generativeai as genai
+from google import genai
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# Initialize Gemini
+# Initialize Gemini client
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    
-# Configuration for the model
-generation_config = {
-    "temperature": 0.2, # Low temperature for more deterministic JSON output
-    "top_p": 0.95,
-    "top_k": 40,
-    "max_output_tokens": 8192,
-}
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY)
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini client: {e}")
 
-# Ordered list of models to try if the primary one is 404/unavailable in the user's GCP project
+# Ordered list of models to try (newest free-tier first)
 FALLBACK_MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-pro"
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
 ]
 
 # System prompt to guide Gemini's behavior and enforce JSON schema
 SYSTEM_PROMPT = """You are a highly intelligent financial assistant Telegram bot. Your primary job is to understand user messages, figure out what they want to do, and extract any relevant data.
-You MUST ALWAYS respond in valid JSON format matching the schema below.
+You MUST ALWAYS respond in valid JSON format matching the schema below. Do NOT wrap your response in markdown code blocks. Output raw JSON only.
 
 You also have access to the user's "Long-Term Memory", which contains their established preferences, budgets, and habits. Use this context to make smarter decisions about categorization, names, and intent.
 
@@ -69,8 +65,8 @@ def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
     Process natural language using Gemini. 
     Gracefully falls back if the API fails, is not configured, or hits limits.
     """
-    if not GEMINI_API_KEY:
-        # Graceful fallback: API key missing
+    if not client:
+        # Graceful fallback: API key missing or client failed to load
         return {"error": "api_failed"}
         
     try:
@@ -84,21 +80,20 @@ def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
         # Try each model in the fallback list until one works
         for model_name in FALLBACK_MODELS:
             try:
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    generation_config=generation_config,
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
                 )
-                response = model.generate_content(prompt)
-                break # Success!
+                break  # Success!
             except Exception as e:
                 last_error = e
                 error_str = str(e).lower()
-                # If it's a 404/Not Found or 403, we try the next model.
+                # If it's a 404/Not Found or 403, try the next model
                 if "404" in error_str or "not found" in error_str or "permission" in error_str:
                     logger.warning(f"Model {model_name} failed ({e}), trying next...")
                     continue
                 else:
-                    # If it's a rate limit (429) or other API issue, usually all models will fail anyway
+                    # Rate limit or other issue - all models will likely fail
                     break
                     
         if not response:
