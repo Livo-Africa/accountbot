@@ -48,6 +48,9 @@ spreadsheet = None
 # Global state for interactive flows
 ORDER_STATES = {}
 
+# Simple in-memory cache to prevent hitting Google Sheets rate limits
+USER_CONTEXT_CACHE = {}
+
 # ==================== AI MEMORY (USER CONTEXT) ====================
 def ensure_user_context_sheet():
     """Ensure the UserContext sheet exists for AI memory."""
@@ -64,6 +67,14 @@ def get_user_context_memory(user_name):
     """Fetch all active long-term memories for a user as a string."""
     if not spreadsheet:
         return ""
+        
+    # Check cache first (valid for 5 minutes)
+    now = time.time()
+    if user_name in USER_CONTEXT_CACHE:
+        cache_entry = USER_CONTEXT_CACHE[user_name]
+        if now - cache_entry['timestamp'] < 300:
+            return cache_entry['memory']
+            
     try:
         sheet = spreadsheet.worksheet('UserContext')
         all_rows = sheet.get_all_values()
@@ -75,7 +86,15 @@ def get_user_context_memory(user_name):
             if len(row) >= 5 and row[0] == user_name and row[4] == 'TRUE':
                 memories.append(f"- {row[2]}")
                 
-        return "\n".join(memories)
+        result_mem = "\n".join(memories)
+        
+        # Save to cache
+        USER_CONTEXT_CACHE[user_name] = {
+            'memory': result_mem,
+            'timestamp': now
+        }
+        
+        return result_mem
     except Exception as e:
         print(f"Error fetching user context: {e}")
         return ""
@@ -90,6 +109,11 @@ def save_user_context_memory(user_name, memory_value):
         # MemoryKey is just a hash or generic string for now
         memory_key = f"mem_{int(time.time())}"
         sheet.append_row([user_name, memory_key, memory_value, timestamp, 'TRUE'])
+        
+        # Clear cache so it fetches fresh next time
+        if user_name in USER_CONTEXT_CACHE:
+            del USER_CONTEXT_CACHE[user_name]
+            
     except Exception as e:
         print(f"Error saving user context: {e}")
 

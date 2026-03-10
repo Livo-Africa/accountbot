@@ -39,7 +39,7 @@ You MUST ALWAYS respond in valid JSON format matching the schema below.
 You also have access to the user's "Long-Term Memory", which contains their established preferences, budgets, and habits. Use this context to make smarter decisions about categorization, names, and intent.
 
 User's Context/Memory:
-{memory_context}
+%s
 
 Output JSON Schema:
 {
@@ -81,14 +81,26 @@ def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
         
     try:
         # Prepare the prompt with memory context
-        prompt = SYSTEM_PROMPT.format(memory_context=context if context else "No special preferences saved yet.")
+        prompt = SYSTEM_PROMPT % (context if context else "No special preferences saved yet.")
         prompt += f"\n\nUser ({user_name}): {text}\nOutput:"
 
         # Call Gemini (Generative AI)
         response = model.generate_content(prompt)
         
+        # Clean response text from markdown block formatting if present
+        text_response = response.text.strip()
+        if text_response.startswith('```json'):
+            text_response = text_response[7:]
+        elif text_response.startswith('```'):
+            text_response = text_response[3:]
+            
+        if text_response.endswith('```'):
+            text_response = text_response[:-3]
+            
+        text_response = text_response.strip()
+        
         # Parse the JSON string into a Python dictionary
-        result = json.loads(response.text)
+        result = json.loads(text_response)
         
         # Ensure 'error' key doesn't accidentally exist if successful
         if "error" in result:
