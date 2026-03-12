@@ -351,13 +351,13 @@ class SmartProcessor:
             ]
         }
         
-    def process_message(self, message: str, user_name: str, saved_memory: str = "") -> dict:
+    def process_message(self, message: str, user_name: str, saved_memory: str = "", conversation_history: list = None) -> dict:
         """
-        Attempts to process the message via Gemini.
+        Attempts to process the message via Gemini with conversation context.
         Returns a dict. If API fails, dict contains {"error": "api_failed"}.
         """
-        # Try Gemini API first
-        gemini_result = process_with_gemini(message, user_name, saved_memory)
+        # Try Gemini API first (now with conversation history)
+        gemini_result = process_with_gemini(message, user_name, saved_memory, conversation_history)
         return gemini_result
     
     def fallback_parse_to_command(self, message: str):

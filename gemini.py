@@ -30,7 +30,10 @@ You MUST ALWAYS respond in valid JSON format matching the schema below. Do NOT w
 You also have access to the user's "Long-Term Memory", which contains their established preferences, budgets, and habits. Use this context to make smarter decisions.
 
 User's Context/Memory:
-%s
+{user_context}
+
+Recent Conversation (use this to understand follow-ups and references):
+{conversation_history}
 
 INTENT LIST (choose the BEST match):
 - 'greeting' — User says hi, hello, good morning, etc.
@@ -74,13 +77,22 @@ IMPORTANT RULES:
 11. If the user says "export", "download report", "send me a PDF" → use 'export_report' and put the period (today/week/month) in the 'target' field.
 12. If the user mentions a client name like "client Kofi" or "tell me about Ama" → use 'check_clients' and put the client name in 'target'.
 
+CONVERSATION CONTEXT RULES (use the Recent Conversation above):
+13. If the user says "also", "and", "too", "as well" — they are ADDING to a previous action. Use conversation history to determine the type (e.g. if they just recorded an expense, "also 50 for fuel" is another expense).
+14. If the user says "delete that", "remove that", "cancel that" — they want to delete the LAST thing they just recorded. Use 'delete_last'.
+15. If the user says "same thing", "same again", "another one", "one more" — repeat the same intent/amount/description from the last message in the conversation.
+16. If the user says "actually", "change it to", "make it", "no wait" — they want to CORRECT a previous entry. Use 'delete_last' if correcting a transaction.
+17. If the user says "what about week?" after asking about today — they want 'check_week'. Use conversation flow to understand short follow-ups.
+18. If the user gives ONLY a number (e.g. "200") after a previous transaction, check the conversation: they likely want to record another transaction of the same type with that amount.
+19. If the user gives a short phrase without clear type (e.g. "fuel" after recording expenses), treat it as the same transaction type from the recent conversation.
+
 Output JSON Schema:
 {
     "intent": "String — must be one of the intents listed above",
     "amount": "Number (float) or null — extract spending/earning amounts here",
     "description": "String or null — item name, service, or reason for the transaction",
     "target": "String or null — transaction ID for deletions, client name for client lookups, period for exports (today/week/month), or any relevant identifier",
-    "conversational_response": "String — a friendly, helpful, short response with EMOJIS. Acknowledge what the user asked for.",
+    "conversational_response": "String — a friendly, helpful, short response with EMOJIS. Acknowledge what the user asked for. Reference conversation context naturally when applicable.",
     "memory_to_save": "String or null — ONLY for 'preference_update'. Summarize the fact concisely."
 }
 
@@ -91,6 +103,18 @@ Output: {"intent": "greeting", "amount": null, "description": null, "target": nu
 User: "I just spent 150 on an uber ride"
 Output: {"intent": "record_expense", "amount": 150.0, "description": "uber ride", "target": null, "conversational_response": "📝 Got it! Recording 150 cedis for your Uber ride. 🚗", "memory_to_save": null}
 
+User (after recording an expense): "also 50 for fuel"
+Output: {"intent": "record_expense", "amount": 50.0, "description": "fuel", "target": null, "conversational_response": "📝 Adding another expense — 50 cedis for fuel. ⛽", "memory_to_save": null}
+
+User (after recording a sale): "same again"
+Output: {"intent": "record_sale", "amount": 5000.0, "description": "website client", "target": null, "conversational_response": "🔄 Recording the same sale again — 5,000 cedis for website client! 💻", "memory_to_save": null}
+
+User (after recording something): "delete that"
+Output: {"intent": "delete_last", "amount": null, "description": null, "target": null, "conversational_response": "🗑️ Removing what we just recorded...", "memory_to_save": null}
+
+User (after checking today): "what about this week?"
+Output: {"intent": "check_week", "amount": null, "description": null, "target": null, "conversational_response": "📊 Let me check this week's numbers too...", "memory_to_save": null}
+
 User: "Made 5000 from the new website client"
 Output: {"intent": "record_sale", "amount": 5000.0, "description": "website client", "target": null, "conversational_response": "🎉 Awesome! Adding 5,000 cedis to your sales. 💻", "memory_to_save": null}
 
@@ -100,27 +124,6 @@ Output: {"intent": "delete_last", "amount": null, "description": null, "target":
 User: "Remove EXP-A1B2C3"
 Output: {"intent": "delete_by_id", "amount": null, "description": null, "target": "EXP-A1B2C3", "conversational_response": "🗑️ Looking for transaction EXP-A1B2C3 to delete...", "memory_to_save": null}
 
-User: "Show me my recent transactions"
-Output: {"intent": "list_transactions", "amount": null, "description": null, "target": null, "conversational_response": "📋 Here are your recent transactions...", "memory_to_save": null}
-
-User: "What are my budgets looking like?"
-Output: {"intent": "check_budgets", "amount": null, "description": null, "target": null, "conversational_response": "💰 Let me check your budgets...", "memory_to_save": null}
-
-User: "How's my goal going?"
-Output: {"intent": "check_goals", "amount": null, "description": null, "target": null, "conversational_response": "🎯 Checking your goal progress...", "memory_to_save": null}
-
-User: "Any pending orders?"
-Output: {"intent": "check_pending", "amount": null, "description": null, "target": null, "conversational_response": "📦 Let me check what's pending...", "memory_to_save": null}
-
-User: "Tell me about client Kofi"
-Output: {"intent": "check_clients", "amount": null, "description": null, "target": "Kofi", "conversational_response": "🔍 Looking up Kofi's profile...", "memory_to_save": null}
-
-User: "Export this month's report"
-Output: {"intent": "export_report", "amount": null, "description": null, "target": "month", "conversational_response": "📊 Generating your monthly report...", "memory_to_save": null}
-
-User: "Where am I spending the most?"
-Output: {"intent": "check_categories", "amount": null, "description": null, "target": null, "conversational_response": "📊 Let me break down your spending by category...", "memory_to_save": null}
-
 User: "Remember that I usually pay 100 for internet every month"
 Output: {"intent": "preference_update", "amount": null, "description": null, "target": null, "conversational_response": "Got it! I'll remember that your internet bill is 100 cedis. 🧠", "memory_to_save": "Standard monthly internet bill is 100"}
 
@@ -128,9 +131,9 @@ User: "Thanks"
 Output: {"intent": "thanks", "amount": null, "description": null, "target": null, "conversational_response": "You're very welcome! Let me know if you need anything else. 😊", "memory_to_save": null}
 """
 
-def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
+def process_with_gemini(text: str, user_name: str, context: str = "", conversation_history: list = None) -> dict:
     """
-    Process natural language using Gemini. 
+    Process natural language using Gemini with conversation history.
     Gracefully falls back if the API fails, is not configured, or hits limits.
     """
     if not client:
@@ -138,8 +141,26 @@ def process_with_gemini(text: str, user_name: str, context: str = "") -> dict:
         return {"error": "api_failed"}
         
     try:
-        # Prepare the prompt with memory context
-        prompt = SYSTEM_PROMPT % (context if context else "No special preferences saved yet.")
+        # Format conversation history for the prompt
+        history_str = "No previous messages."
+        if conversation_history:
+            history_lines = []
+            for msg in conversation_history[-8:]:  # Last 8 exchanges max
+                role = msg.get('role', 'user')
+                content = msg.get('content', '')
+                if role == 'user':
+                    history_lines.append(f"User: {content}")
+                else:
+                    # Truncate long bot responses to save tokens
+                    short_content = content[:150] + '...' if len(content) > 150 else content
+                    history_lines.append(f"Bot: {short_content}")
+            history_str = "\n".join(history_lines)
+        
+        # Prepare the prompt with memory context and conversation history
+        prompt = SYSTEM_PROMPT.format(
+            user_context=context if context else "No special preferences saved yet.",
+            conversation_history=history_str
+        )
         prompt += f"\n\nUser ({user_name}): {text}\nOutput:"
 
         response = None

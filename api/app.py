@@ -4,7 +4,7 @@ import os
 import json
 import urllib.request
 import re
-from engine import process_command, BOT_USERNAME
+from engine import process_command, BOT_USERNAME, add_to_conversation_history
 
 app = Flask(__name__)
 
@@ -56,33 +56,111 @@ def send_telegram_document(chat_id, pdf_buffer, filename):
     except Exception as e:
         print(f"Failed to send document: {e}")
 
+
+# Wake words the bot responds to in group chats (case-insensitive)
+WAKE_WORDS = ['bottie', 'botti']
+
+# Command prefixes that don't need a wake word
+COMMAND_PREFIXES = ('+', '/')
+
+# Exact command words that don't need a wake word
+EXACT_COMMANDS = {
+    'help', 'balance', 'today', 'week', 'month', 'tutorial', 'guide',
+    'quickstart', 'examples', 'commands', 'menu', 'budgets', 'orders',
+    'clients', 'insights', 'reminders', 'goals'
+}
+
+# Junk messages to ignore entirely (saves API calls)
+JUNK_MESSAGES = {
+    'ok', 'okay', 'k', 'kk', 'lol', 'lmao', 'haha', 'hehe', 'hmm',
+    'nice', 'true', 'yes', 'no', 'yep', 'nah', 'nope', 'sure', 'cool',
+    'wow', 'damn', 'bruh', 'fr', 'gg', 'smh', 'tbh', 'ikr', 'idk',
+    'same', 'facts', 'bet', 'say less', 'aight'
+}
+
+def is_bot_triggered(text, chat_type):
+    """
+    Determine if the bot should respond to this message.
+    Returns (should_respond: bool, cleaned_text: str)
+    """
+    text_stripped = text.strip()
+    text_lower = text_stripped.lower()
+
+    # --- Private chats: always respond ---
+    if chat_type == 'private':
+        # Still filter junk in private chats to save Gemini calls
+        if text_lower in JUNK_MESSAGES:
+            return False, ""
+        # Filter very short non-command messages (emojis, single chars)
+        if len(text_stripped) <= 2 and not text_lower.startswith(('+', '/')):
+            return False, ""
+        return True, text_stripped
+
+    # --- Group chats: only respond if triggered ---
+
+    # 1. Check for @bot mention
+    if BOT_USERNAME:
+        mention = f"@{BOT_USERNAME}".lower()
+        if mention in text_lower:
+            # Remove the mention and clean up
+            pattern = re.compile(re.escape(f"@{BOT_USERNAME}"), re.IGNORECASE)
+            cleaned = pattern.sub('', text_stripped)
+            cleaned = re.sub(r'^[:\s,]+|[:\s,]+$', '', cleaned).strip()
+            return True, cleaned if cleaned else "help"
+
+    # 2. Check for wake words ("bottie", "botti")
+    for wake_word in WAKE_WORDS:
+        if text_lower.startswith(wake_word):
+            # Strip the wake word and clean up
+            cleaned = text_stripped[len(wake_word):].strip()
+            cleaned = re.sub(r'^[:\s,]+', '', cleaned).strip()
+            return True, cleaned if cleaned else "help"
+
+    # 3. Check for command prefixes (+sale, /help, etc.)
+    if text_lower.startswith(COMMAND_PREFIXES):
+        return True, text_stripped
+
+    # 4. Check for exact command words
+    first_word = text_lower.split()[0] if text_lower.split() else ""
+    if first_word in EXACT_COMMANDS:
+        return True, text_stripped
+
+    # Not triggered — stay silent
+    return False, ""
+
 def clean_message_text(text):
-    """Clean message text by removing bot mentions."""
-    if not text or not BOT_USERNAME:
+    """Clean message text by removing bot mentions and wake words."""
+    if not text:
         return text.strip()
-    
-    # Remove @bot_username from message (case insensitive)
-    mention = f"@{BOT_USERNAME}"
-    text_lower = text.lower()
-    mention_lower = mention.lower()
-    
-    if mention_lower in text_lower:
-        # Find and remove the mention
-        pattern = re.compile(re.escape(mention), re.IGNORECASE)
-        cleaned = pattern.sub('', text)
-        # Clean up extra spaces or punctuation
-        cleaned = re.sub(r'^[:\s,]+|[:\s,]+$', '', cleaned)
-        return cleaned.strip()
-    
-    return text.strip()
+
+    cleaned = text.strip()
+
+    # Remove @bot_username
+    if BOT_USERNAME:
+        mention = f"@{BOT_USERNAME}"
+        if mention.lower() in cleaned.lower():
+            pattern = re.compile(re.escape(mention), re.IGNORECASE)
+            cleaned = pattern.sub('', cleaned)
+            cleaned = re.sub(r'^[:\s,]+|[:\s,]+$', '', cleaned).strip()
+
+    # Remove wake words from start
+    for wake_word in WAKE_WORDS:
+        if cleaned.lower().startswith(wake_word):
+            cleaned = cleaned[len(wake_word):].strip()
+            cleaned = re.sub(r'^[:\s,]+', '', cleaned).strip()
+            break
+
+    return cleaned if cleaned else "help"
 
 @app.route('/api/app', methods=['POST'])
 def webhook():
     """
-    Main webhook: Process ALL commands in ALL chat types.
+    Main webhook: Smart filtering — only responds when triggered.
+    Private chats: always responds (except junk).
+    Group chats: only responds to wake word 'bottie', @mention, or command prefix.
     """
     update = request.get_json()
-    
+
     chat_id = None
     text = ""
     user_name = "User"
@@ -94,16 +172,24 @@ def webhook():
         chat_type = message['chat']['type']
         text = message.get('text', '').strip()
         user_name = message['from'].get('first_name', 'User')
-        
-        # Clean the message (remove @bot mentions if present)
-        clean_text = clean_message_text(text)
-        
-        # Process EVERY message through the engine
+
+        # Smart filtering: should the bot respond?
+        should_respond, clean_text = is_bot_triggered(text, chat_type)
+
+        if not should_respond:
+            # Stay silent — don't waste API calls
+            return jsonify({'status': 'ok'})
+
+        # Process the cleaned message through the engine
         if chat_id is not None and clean_text:
             bot_reply = process_command(clean_text, user_name)
-            
+
             # Only send response if the engine returned something meaningful
             if bot_reply:
+                # Record bot response in conversation history
+                if isinstance(bot_reply, str):
+                    add_to_conversation_history(user_name, 'bot', bot_reply)
+                
                 if isinstance(bot_reply, dict) and bot_reply.get('type') == 'document':
                     send_telegram_document(chat_id, bot_reply['buffer'], bot_reply['filename'])
                 else:
@@ -119,6 +205,7 @@ def webhook():
         return jsonify({'status': 'ok'})
 
     return jsonify({'status': 'ok'})
+
 
 @app.route('/', methods=['GET'])
 def index():
