@@ -51,46 +51,6 @@ ORDER_STATES = {}
 # Simple in-memory cache to prevent hitting Google Sheets rate limits
 USER_CONTEXT_CACHE = {}
 
-# ==================== CONVERSATION HISTORY BUFFER ====================
-# Per-user rolling buffer of recent messages for multi-turn context
-# Format: {user_name: {'messages': [{'role': 'user'|'bot', 'content': str}], 'last_active': timestamp}}
-CONVERSATION_HISTORY = {}
-MAX_HISTORY_LENGTH = 10  # Keep last 10 exchanges per user
-HISTORY_EXPIRY_SECONDS = 1800  # 30 minutes — expire old conversations
-
-def get_conversation_history(user_name):
-    """Get the recent conversation history for a user."""
-    if user_name not in CONVERSATION_HISTORY:
-        return []
-    
-    entry = CONVERSATION_HISTORY[user_name]
-    
-    # Check if conversation has expired (30 min inactivity)
-    if time.time() - entry['last_active'] > HISTORY_EXPIRY_SECONDS:
-        del CONVERSATION_HISTORY[user_name]
-        return []
-    
-    return entry['messages']
-
-def add_to_conversation_history(user_name, role, content):
-    """Add a message to the user's conversation history."""
-    if user_name not in CONVERSATION_HISTORY:
-        CONVERSATION_HISTORY[user_name] = {
-            'messages': [],
-            'last_active': time.time()
-        }
-    
-    entry = CONVERSATION_HISTORY[user_name]
-    entry['last_active'] = time.time()
-    
-    # Truncate very long content for storage (bot responses can be huge)
-    stored_content = content[:200] if len(content) > 200 else content
-    entry['messages'].append({'role': role, 'content': stored_content})
-    
-    # Keep only last N messages
-    if len(entry['messages']) > MAX_HISTORY_LENGTH:
-        entry['messages'] = entry['messages'][-MAX_HISTORY_LENGTH:]
-
 # ==================== AI MEMORY (USER CONTEXT) ====================
 def ensure_user_context_sheet():
     """Ensure the UserContext sheet exists for AI memory."""
@@ -3148,47 +3108,13 @@ def process_command(user_input, user_name="User"):
             return correction_response
 
     # ==================== MAIN COMMAND PROCESSOR (SMART AI INTERCEPT) ====================
-    # Skip Gemini for messages that are clearly commands — saves free tier API calls
+    # Before we do any regex matching or exact command checks, let Gemini analyze the intent.
     
-    # Prefix commands (+sale, +expense, /help, etc.) go straight to regex engine
-    SKIP_GEMINI_PREFIXES = ('+', '/')
-    SKIP_GEMINI_EXACT = {
-        'help', 'balance', 'today', 'week', 'month', 'tutorial', 'guide',
-        'quickstart', 'quick', 'start', 'examples', 'example', 'show me',
-        'commands', 'menu', 'what can you do', 'budgets', 'my_budgets',
-        'show_budgets', 'budget_summary', 'getting started',
-        'unitprice', 'perunit', 'price_check'
-    }
+    # 1. Fetch AI Context/Memory
+    user_context = get_user_context_memory(user_name)
     
-    skip_gemini = False
-    
-    # Check prefix commands
-    if text_lower.startswith(SKIP_GEMINI_PREFIXES):
-        skip_gemini = True
-    
-    # Check exact command words
-    first_word = text_lower.split()[0] if text_lower.split() else ""
-    if first_word in SKIP_GEMINI_EXACT or text_lower in SKIP_GEMINI_EXACT:
-        skip_gemini = True
-    
-    # Check other known command patterns (price_history, compare, etc.)
-    if any(text_lower.startswith(p) for p in ['price_history ', 'trends ', 'compare ', 'best_price ']):
-        skip_gemini = True
-    
-    gemini_result = None
-    
-    if not skip_gemini:
-        # 1. Record the user's message in conversation history
-        add_to_conversation_history(user_name, 'user', text)
-        
-        # 2. Fetch AI Context/Memory
-        user_context = get_user_context_memory(user_name)
-        
-        # 3. Get conversation history for this user
-        conv_history = get_conversation_history(user_name)
-        
-        # 4. Try Gemini (with conversation history for multi-turn context)
-        gemini_result = nlp_processor.process_message(text, user_name, user_context, conv_history)
+    # 2. Try Gemini
+    gemini_result = nlp_processor.process_message(text, user_name, user_context)
     
     # 3. IF GEMINI SUCCEEDED (no error flag), use its structured output
     if gemini_result and "error" not in gemini_result:
